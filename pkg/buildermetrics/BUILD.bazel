@@ -9,9 +9,10 @@ go_library(
     srcs = [
         "buildermetrics.go",
         "counter.go",
-        "metricids.go",
+        "counterids.go",
     ],
     importpath = "github.com/GoogleCloudPlatform/buildpacks/" + package_name(),
+    visibility = ["//visibility:public"],
 )
 
 go_test(
@@ -24,4 +25,12 @@ go_test(
     embed = [":buildermetrics"],
     rundir = ".",
     deps = ["@com_github_google_go-cmp//cmp:go_default_library"],
+)
+
+go_test(
+    name = "counterids_test",
+    size = "small",
+    srcs = ["counterids_test.go"],
+    embed = [":buildermetrics"],
+    rundir = ".",
 )

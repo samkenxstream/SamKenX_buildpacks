@@ -53,7 +53,9 @@ func buildFn(ctx *gcp.Context) error {
 	}
 
 	// Check for syntax errors to prevent failures that would only manifest at run time.
-	ctx.Exec([]string{"python3", "-m", "compileall", "-f", "-q", "."}, gcp.WithStdoutTail, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"python3", "-m", "compileall", "-f", "-q", "."}, gcp.WithStdoutTail, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 
 	// Determine if the function has dependency on functions-framework.
 	hasFrameworkDependency := false
@@ -88,7 +90,9 @@ func buildFn(ctx *gcp.Context) error {
 		l.BuildEnvironment.Append(python.RequirementsFilesEnv, string(os.PathListSeparator), r)
 	}
 
-	ctx.SetFunctionsEnvVars(l)
+	if err := ctx.SetFunctionsEnvVars(l); err != nil {
+		return err
+	}
 	ctx.AddWebProcess([]string{"functions-framework"})
 	return nil
 }

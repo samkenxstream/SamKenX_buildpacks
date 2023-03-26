@@ -16,21 +16,21 @@
 package ruby
 
 import (
-	"bufio"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
+	"github.com/Masterminds/semver"
 
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 )
 
-// Match against ruby string example: ruby 2.6.7p450
-var rubyVersionRe = regexp.MustCompile(`^\s*ruby\s+([^p^\s]+)(p\d+)?\s*$`)
+const defaultVersion = "3.1.*"
 
-const defaultVersion = "3.0.0"
+// RubyVersionKey is the environment variable name used to store the Ruby version installed.
+const RubyVersionKey = "build_ruby_version"
 
 // DetectVersion detects ruby version from the environment, Gemfile.lock, gems.locked, or falls
 // back to a default version.
@@ -38,6 +38,16 @@ func DetectVersion(ctx *gcp.Context) (string, error) {
 	versionFromEnv := os.Getenv(env.RuntimeVersion)
 	// The two lock files have the same format for Ruby version
 	lockFiles := []string{"Gemfile.lock", "gems.locked"}
+
+	// If environment is GAE or GCF, skip lock file validation.
+	// App Engine specific validation is done in a different buildpack.
+	if env.IsGAE() || env.IsGCF() {
+		if versionFromEnv != "" {
+			ctx.Logf(
+				"Using runtime version from environment variable %s: %s", env.RuntimeVersion, versionFromEnv)
+			return versionFromEnv, nil
+		}
+	}
 
 	for _, lockFileName := range lockFiles {
 
@@ -47,17 +57,10 @@ func DetectVersion(ctx *gcp.Context) (string, error) {
 			return "", err
 		}
 		if pathExists {
-
-			file, err := os.Open(path)
-			if err != nil {
-				return "", err
-			}
-
-			defer file.Close()
-			lockedVersion, err := lockFileVersion(lockFileName, file)
+			lockedVersion, err := ParseRubyVersion(path)
 
 			if err != nil {
-				return "", err
+				return "", gcp.UserErrorf("Error %q in: %s", err, lockFileName)
 			}
 
 			// Lockfile doesn't contain a ruby version, so we can move on
@@ -77,37 +80,71 @@ func DetectVersion(ctx *gcp.Context) (string, error) {
 	}
 
 	if versionFromEnv != "" {
-		ctx.Logf("Using runtime version from %s: %s", env.RuntimeVersion, versionFromEnv)
+		ctx.Logf(
+			"Using runtime version from environment variable %s: %s", env.RuntimeVersion, versionFromEnv)
 		return versionFromEnv, nil
 	}
 
 	return defaultVersion, nil
 }
 
-// lockFileVersion extacts the version number from Gemfile.lock or gems.locked, returns an error in
-// case the version string is malformed.
-func lockFileVersion(fileName string, r io.Reader) (string, error) {
-	const token = "RUBY VERSION"
+// IsRuby25 returns true if the build environment has Ruby 2.5.x installed.
+func IsRuby25(ctx *gcp.Context) bool {
+	return strings.HasPrefix(os.Getenv(RubyVersionKey), "2.5")
+}
 
-	scanner := bufio.NewScanner(r)
+// SupportsBundler1 returns true if the installed Ruby version is compatible with Bundler 1.
+// Bundler 1 breaks with Ruby 3.2. This functions returns true for all versions older than 3.2.
+func SupportsBundler1(ctx *gcp.Context) (bool, error) {
+	rubyVersion, err := semver.NewVersion(os.Getenv(RubyVersionKey))
+	if err != nil {
+		return false, err
+	}
+	ruby32Version, _ := semver.NewVersion("3.2.0")
+	return rubyVersion.LessThan(ruby32Version), nil
+}
 
-	for scanner.Scan() {
-		if scanner.Text() == token {
-			// Read the next line once the token is found
-			if !scanner.Scan() {
-				break
-			}
-
-			version := scanner.Text()
-
-			matches := rubyVersionRe.FindStringSubmatch(version)
-			if len(matches) > 1 {
-				return matches[1], nil
-			}
-
-			return "", gcp.UserErrorf("Invalid ruby version in %s: %q", fileName, version)
-		}
+// NeedsRailsAssetPrecompile detects if asset precompilation is required in a Ruby on Rails app.
+func NeedsRailsAssetPrecompile(ctx *gcp.Context) (bool, error) {
+	isRailsApp, err := ctx.FileExists("bin", "rails")
+	if err != nil {
+		return false, fmt.Errorf("finding bin/rails: %w", err)
+	}
+	if !isRailsApp {
+		return false, nil
 	}
 
-	return "", nil
+	assetsExists, err := ctx.FileExists("app", "assets")
+	if err != nil {
+		return false, err
+	}
+	if !assetsExists {
+		return false, nil
+	}
+
+	manifestExists, err := ctx.FileExists("public", "assets", "manifest.yml")
+	if err != nil {
+		return false, err
+	}
+	if manifestExists {
+		return false, nil
+	}
+
+	matches, err := ctx.Glob("public/assets/manifest-*.json")
+	if err != nil {
+		return false, fmt.Errorf("finding manifets: %w", err)
+	}
+	if matches != nil {
+		return false, nil
+	}
+
+	matches, err = ctx.Glob("public/assets/.sprockets-manifest-*.json")
+	if err != nil {
+		return false, fmt.Errorf("finding sprockets-manifets: %w", err)
+	}
+	if matches != nil {
+		return false, nil
+	}
+
+	return true, nil
 }

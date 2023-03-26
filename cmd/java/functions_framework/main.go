@@ -64,7 +64,9 @@ func buildFn(ctx *gcp.Context) error {
 		return err
 	}
 
-	ctx.SetFunctionsEnvVars(layer)
+	if err := ctx.SetFunctionsEnvVars(layer); err != nil {
+		return err
+	}
 
 	// Use javap to check that the class is indeed in the classpath we just determined.
 	// On success, it will output a description of the class and its public members, which we discard.
@@ -73,7 +75,7 @@ func buildFn(ctx *gcp.Context) error {
 	// required interfaces, for example. But it eliminates the commonest problem of specifying the wrong target.
 	// We use an ExecUser* method so that the time taken by the javap command is counted as user time.
 	target := os.Getenv(env.FunctionTarget)
-	if result, err := ctx.ExecWithErr([]string{"javap", "-classpath", classpath, target}, gcp.WithUserAttribution); err != nil {
+	if result, err := ctx.Exec([]string{"javap", "-classpath", classpath, target}, gcp.WithUserAttribution); err != nil {
 		// The javap error output will typically be "Error: class not found: foo.Bar".
 		return gcp.UserErrorf("build succeeded but did not produce the class %q specified as the function target: %s", target, result.Combined)
 	}
@@ -140,17 +142,21 @@ func classpath(ctx *gcp.Context) (string, error) {
 // mavenClasspath determines the --classpath when there is a pom.xml. This will consist of the jar file built
 // from the pom.xml itself, plus all jar files that are dependencies mentioned in the pom.xml.
 func mavenClasspath(ctx *gcp.Context) (string, error) {
-
 	mvn, err := java.MvnCmd(ctx)
 	if err != nil {
 		return "", err
 	}
 
 	// Copy the dependencies of the function (`<dependencies>` in pom.xml) into target/dependency.
-	ctx.Exec([]string{mvn, "--batch-mode", "dependency:copy-dependencies", "-Dmdep.prependGroupId", "-DincludeScope=runtime"}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{mvn, "--batch-mode", "dependency:copy-dependencies", "-Dmdep.prependGroupId", "-DincludeScope=runtime"}, gcp.WithUserAttribution); err != nil {
+		return "", err
+	}
 
 	// Extract the final jar name from the user's pom.xml definitions.
-	execResult := ctx.Exec([]string{mvn, "help:evaluate", "-q", "-DforceStdout", "-Dexpression=project.build.finalName"}, gcp.WithUserAttribution)
+	execResult, err := ctx.Exec([]string{mvn, "help:evaluate", "-q", "-DforceStdout", "-Dexpression=project.build.finalName"}, gcp.WithUserAttribution)
+	if err != nil {
+		return "", err
+	}
 	artifactName := strings.TrimSpace(execResult.Stdout)
 	if len(artifactName) == 0 {
 		return "", gcp.UserErrorf("invalid project.build.finalName configured in pom.xml")
@@ -176,6 +182,11 @@ func mavenClasspath(ctx *gcp.Context) (string, error) {
 // because apparently you can't define tasks there; and having the predefined script include the user's build.gradle
 // didn't work very well either, because you can't use a plugins {} clause in an included script.
 func gradleClasspath(ctx *gcp.Context) (string, error) {
+	gradle, err := java.GradleCmd(ctx)
+	if err != nil {
+		return "", err
+	}
+
 	extraTasksSource := filepath.Join(ctx.BuildpackRoot(), "extra_tasks.gradle")
 	extraTasksText, err := ctx.ReadFile(extraTasksSource)
 	if err != nil {
@@ -194,10 +205,15 @@ func gradleClasspath(ctx *gcp.Context) (string, error) {
 	}
 
 	// Copy the dependencies of the function (`dependencies {...}` in build.gradle) into build/_javaFunctionDependencies.
-	ctx.Exec([]string{"gradle", "--quiet", "_javaFunctionCopyAllDependencies"}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{gradle, "--quiet", "_javaFunctionCopyAllDependencies"}, gcp.WithUserAttribution); err != nil {
+		return "", err
+	}
 
 	// Extract the name of the target jar.
-	execResult := ctx.Exec([]string{"gradle", "--quiet", "_javaFunctionPrintJarTarget"}, gcp.WithUserAttribution)
+	execResult, err := ctx.Exec([]string{gradle, "--quiet", "_javaFunctionPrintJarTarget"}, gcp.WithUserAttribution)
+	if err != nil {
+		return "", err
+	}
 	jarName := strings.TrimSpace(execResult.Stdout)
 	jarExists, err := ctx.FileExists(jarName)
 	if err != nil {
@@ -225,14 +241,16 @@ func installFunctionsFramework(ctx *gcp.Context, layer *libcnb.Layer) (string, e
 			return "", err
 		}
 		// If the invoker was listed as a dependency in the pom.xml, copy it into target/_javaInvokerDependency.
-		ctx.Exec([]string{
+		if _, err := ctx.Exec([]string{
 			mvn,
 			"--batch-mode",
 			"dependency:copy-dependencies",
 			"-DoutputDirectory=target/_javaInvokerDependency",
 			"-DincludeGroupIds=com.google.cloud.functions",
 			"-DincludeArtifactIds=java-function-invoker",
-		}, gcp.WithUserAttribution)
+		}, gcp.WithUserAttribution); err != nil {
+			return "", err
+		}
 		jars, err = ctx.Glob("target/_javaInvokerDependency/java-function-invoker-*.jar")
 		if err != nil {
 			return "", fmt.Errorf("finding java-function-invoker jar: %w", err)
@@ -290,10 +308,7 @@ func isInvokerJar(ctx *gcp.Context, jar string) bool {
 func installFramework(ctx *gcp.Context, layer *libcnb.Layer, version string) error {
 	url := fmt.Sprintf(functionsFrameworkURLTemplate, version)
 	ffName := filepath.Join(layer.Path, "functions-framework.jar")
-	result, err := ctx.ExecWithErr([]string{"curl", "--silent", "--fail", "--show-error", "--output", ffName, url})
-	// We use ExecWithErr rather than plain Exec because if it fails we want to exit with an error message better
-	// than "Failure: curl: (22) The requested URL returned error: 404".
-	// TODO(b/155874677): use plain Exec once it gives sufficient error messages.
+	result, err := ctx.Exec([]string{"curl", "--silent", "--fail", "--show-error", "--output", ffName, url})
 	if err != nil {
 		return gcp.InternalErrorf("fetching functions framework jar: %v\n%s", err, result.Stderr)
 	}

@@ -18,11 +18,18 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
+	"github.com/buildpacks/libcnb"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/php"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
+)
+
+const (
+	phpIniName = "php.ini"
 )
 
 func main() {
@@ -30,7 +37,7 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	if result := runtime.CheckOverride(ctx, "php"); result != nil {
+	if result := runtime.CheckOverride("php"); result != nil {
 		return result, nil
 	}
 
@@ -41,7 +48,7 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 	if composerJSONExists {
 		return gcp.OptInFileFound("composer.json"), nil
 	}
-	atLeastOne, err := ctx.HasAtLeastOne("*.php")
+	atLeastOne, err := ctx.HasAtLeastOneOutsideDependencyDirectories("*.php")
 	if err != nil {
 		return nil, fmt.Errorf("finding *.php files: %w", err)
 	}
@@ -57,10 +64,44 @@ func buildFn(ctx *gcp.Context) error {
 	if err != nil {
 		return fmt.Errorf("determining runtime version: %w", err)
 	}
-	phpl, err := ctx.Layer("php", gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayer)
+	phpl, err := ctx.Layer("php", gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayerUnlessSkipRuntimeLaunch)
+
 	if err != nil {
 		return fmt.Errorf("creating layer: %w", err)
 	}
 	_, err = runtime.InstallTarballIfNotCached(ctx, runtime.PHP, version, phpl)
-	return err
+	if err != nil {
+		return err
+	}
+
+	setPeclConfig(phpl)
+	setPHPFpmConfig(phpl)
+
+	return addPHPIni(ctx, phpl)
+}
+
+func setPeclConfig(phpl *libcnb.Layer) {
+	phpl.SharedEnvironment.Default("PHP_PEAR_PHP_BIN", filepath.Join(phpl.Path, "bin", "php"))
+	phpl.SharedEnvironment.Default("PHP_PEAR_INSTALL_DIR", filepath.Join(phpl.Path, "lib", "php"))
+}
+
+func setPHPFpmConfig(phpl *libcnb.Layer) {
+	phpl.LaunchEnvironment.Append("PATH", string(os.PathListSeparator), filepath.Join(phpl.Path, "sbin"))
+}
+
+func addPHPIni(ctx *gcp.Context, phpl *libcnb.Layer) error {
+	destDir := filepath.Join(phpl.Path, "etc")
+	destPath := filepath.Join(destDir, phpIniName)
+
+	if err := ctx.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("creating etc folder: %w", err)
+	}
+
+	if err := ctx.WriteFile(destPath, []byte(php.PHPIni), os.FileMode(0755)); err != nil {
+		return err
+	}
+
+	// PHP uses PHPRC env var to find php.ini
+	phpl.LaunchEnvironment.Default("PHPRC", destDir)
+	return nil
 }

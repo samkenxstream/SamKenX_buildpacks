@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	bpt "github.com/GoogleCloudPlatform/buildpacks/internal/buildpacktest"
+	"github.com/GoogleCloudPlatform/buildpacks/internal/mockprocess"
 	"github.com/GoogleCloudPlatform/buildpacks/internal/testserver"
 )
 
@@ -28,26 +29,56 @@ func TestDetect(t *testing.T) {
 		name  string
 		files map[string]string
 		want  int
+		env   []string
 	}{
 		{
-			name: "with composer.json",
+			name: "gae with composer.json",
 			files: map[string]string{
 				"index.php":     "",
 				"composer.json": "",
 			},
+			env: []string{
+				"X_GOOGLE_TARGET_PLATFORM=gae",
+			},
 			want: 0,
 		},
 		{
-			name: "without composer.json",
+			name: "gae without composer.json",
 			files: map[string]string{
 				"index.php": "",
 			},
+			env: []string{
+				"X_GOOGLE_TARGET_PLATFORM=gae",
+			},
 			want: 100,
+		},
+		{
+			name: "gcf with composer.json",
+			files: map[string]string{
+				"index.php":     "",
+				"composer.json": "",
+			},
+			env: []string{
+				"X_GOOGLE_TARGET_PLATFORM=gcf",
+				"GOOGLE_FUNCTION_TARGET=helloWorld",
+			},
+			want: 0,
+		},
+		{
+			name: "gcf without composer.json",
+			files: map[string]string{
+				"index.php": "",
+			},
+			env: []string{
+				"X_GOOGLE_TARGET_PLATFORM=gcf",
+				"GOOGLE_FUNCTION_TARGET=helloWorld",
+			},
+			want: 0,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			bpt.TestDetect(t, detectFn, tc.name, tc.files, []string{}, tc.want)
+			bpt.TestDetect(t, detectFn, tc.name, tc.files, tc.env, tc.want)
 		})
 	}
 }
@@ -55,13 +86,13 @@ func TestDetect(t *testing.T) {
 func TestBuild(t *testing.T) {
 	var (
 		expectedHash    = "expected_sha384_hash"
-		actualHashCmd   = "php -r"
+		actualHashCmd   = "php -d 'error_reporting=24575' -r"
 		runInstallerCmd = fmt.Sprintf("php %s/%s", composerLayer, composerSetup)
 	)
 
 	testCases := []struct {
 		name                string
-		opts                []bpt.Option
+		mocks               []*mockprocess.Mock
 		wantExitCode        int // 0 if unspecified
 		wantCommands        []string
 		skippedCommands     []string
@@ -70,9 +101,9 @@ func TestBuild(t *testing.T) {
 	}{
 		{
 			name: "good composer-setup hash with installation",
-			opts: []bpt.Option{
-				bpt.WithExecMock("sha384", bpt.MockStdout(expectedHash)),
-				bpt.WithExecMock("--filename composer", bpt.MockExitCode(0)),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New("sha384", mockprocess.WithStdout(expectedHash)),
+				mockprocess.New("--filename composer", mockprocess.WithExitCode(0)),
 			},
 			wantCommands: []string{
 				actualHashCmd,
@@ -81,9 +112,9 @@ func TestBuild(t *testing.T) {
 		},
 		{
 			name: "bad composer-setup hash with installation",
-			opts: []bpt.Option{
-				bpt.WithExecMock("sha384", bpt.MockStdout("actual_sha384_hash")),
-				bpt.WithExecMock("--filename composer", bpt.MockExitCode(0)),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New("sha384", mockprocess.WithStdout("actual_sha384_hash")),
+				mockprocess.New("--filename composer", mockprocess.WithExitCode(0)),
 			},
 			wantCommands: []string{
 				actualHashCmd,
@@ -95,9 +126,9 @@ func TestBuild(t *testing.T) {
 		},
 		{
 			name: "unable to download composer-setup",
-			opts: []bpt.Option{
-				bpt.WithExecMock("sha384", bpt.MockStdout(expectedHash)),
-				bpt.WithExecMock("--filename composer", bpt.MockExitCode(0)),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New("sha384", mockprocess.WithStdout(expectedHash)),
+				mockprocess.New("--filename composer", mockprocess.WithExitCode(0)),
 			},
 			skippedCommands: []string{
 				actualHashCmd,
@@ -108,9 +139,9 @@ func TestBuild(t *testing.T) {
 		},
 		{
 			name: "unable to get expected hash",
-			opts: []bpt.Option{
-				bpt.WithExecMock("sha384", bpt.MockStdout(expectedHash)),
-				bpt.WithExecMock("--filename composer", bpt.MockExitCode(0)),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New("sha384", mockprocess.WithStdout(expectedHash)),
+				mockprocess.New("--filename composer", mockprocess.WithExitCode(0)),
 			},
 			skippedCommands: []string{
 				actualHashCmd,
@@ -121,9 +152,9 @@ func TestBuild(t *testing.T) {
 		},
 		{
 			name: "unable to get actual hash",
-			opts: []bpt.Option{
-				bpt.WithExecMock("sha384", bpt.MockExitCode(1)),
-				bpt.WithExecMock("--filename composer", bpt.MockExitCode(0)),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New("sha384", mockprocess.WithExitCode(1)),
+				mockprocess.New("--filename composer", mockprocess.WithExitCode(0)),
 			},
 			wantCommands: []string{
 				actualHashCmd,
@@ -155,9 +186,9 @@ func TestBuild(t *testing.T) {
 
 			opts := []bpt.Option{
 				bpt.WithTestName(tc.name),
+				bpt.WithExecMocks(tc.mocks...),
 			}
 
-			opts = append(opts, tc.opts...)
 			result, err := bpt.RunBuild(t, buildFn, opts...)
 			if err != nil && tc.wantExitCode == 0 {
 				t.Fatalf("error running build: %v, result: %#v", err, result)

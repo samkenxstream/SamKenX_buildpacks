@@ -43,6 +43,9 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if nodejs.IsNodeJS8Runtime() {
+		return gcp.OptOut("Incompatible with nodejs8"), nil
+	}
 	if _, ok := os.LookupEnv(env.FunctionTarget); ok {
 		return gcp.OptInEnvSet(env.FunctionTarget), nil
 	}
@@ -102,14 +105,18 @@ func buildFn(ctx *gcp.Context) error {
 
 	// TODO(mattrobertson) remove this check once Nodejs has backported the fix to v16. More info here:
 	// https://github.com/GoogleCloudPlatform/functions-framework-nodejs/issues/407
-	if skip, err := nodejs.SkipSyntaxCheck(ctx, fnFile); err != nil {
+	if skip, err := nodejs.SkipSyntaxCheck(ctx, fnFile, pjs); err != nil {
 		return err
 	} else if !skip {
 		// Syntax check the function code without executing to prevent run-time errors.
 		if yarnPnP {
-			ctx.Exec([]string{"yarn", "node", "--check", fnFile}, gcp.WithUserAttribution)
+			if _, err := ctx.Exec([]string{"yarn", "node", "--check", fnFile}, gcp.WithUserAttribution); err != nil {
+				return err
+			}
 		} else {
-			ctx.Exec([]string{"node", "--check", fnFile}, gcp.WithUserAttribution)
+			if _, err := ctx.Exec([]string{"node", "--check", fnFile}, gcp.WithUserAttribution); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -166,7 +173,9 @@ func buildFn(ctx *gcp.Context) error {
 		l.LaunchEnvironment.Prepend("NODE_OPTIONS", " ", fmt.Sprintf("--max-old-space-size=%d", size))
 	}
 
-	ctx.SetFunctionsEnvVars(l)
+	if err := ctx.SetFunctionsEnvVars(l); err != nil {
+		return err
+	}
 	ctx.AddWebProcess([]string{"/bin/bash", "-c", ff})
 	return nil
 }
@@ -177,29 +186,27 @@ func installFunctionsFramework(ctx *gcp.Context, l *libcnb.Layer) error {
 	pjs := filepath.Join(cvt, "package.json")
 	pljs := filepath.Join(cvt, nodejs.PackageLock)
 
-	cached, err := nodejs.CheckCache(ctx, l, cache.WithStrings(nodejs.EnvProduction), cache.WithFiles(pjs, pljs))
+	cached, err := nodejs.CheckOrClearCache(ctx, l, cache.WithStrings(nodejs.EnvProduction), cache.WithFiles(pjs, pljs))
 	if err != nil {
 		return fmt.Errorf("checking cache: %w", err)
 	}
 	if cached {
-		ctx.CacheHit(layerName)
 		return nil
 	}
 	installCmd, err := nodejs.NPMInstallCommand(ctx)
 	if err != nil {
 		return err
 	}
-
-	ctx.CacheMiss(layerName)
-	if err := ctx.ClearLayer(l); err != nil {
-		return fmt.Errorf("clearing layer %q: %w", l.Name, err)
-	}
 	// NPM expects package.json and the lock file in the prefix directory.
-	ctx.Exec([]string{"cp", "-t", l.Path, pjs, pljs}, gcp.WithUserTimingAttribution)
+	if _, err := ctx.Exec([]string{"cp", "-t", l.Path, pjs, pljs}, gcp.WithUserTimingAttribution); err != nil {
+		return err
+	}
 	if err := ar.GenerateNPMConfig(ctx); err != nil {
 		return fmt.Errorf("generating Artifact Registry credentials: %w", err)
 	}
-	ctx.Exec([]string{"npm", installCmd, "--quiet", "--production", "--prefix", l.Path}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"npm", installCmd, "--quiet", "--production", "--prefix", l.Path}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -237,6 +244,10 @@ func usingYarnModuleResolution(ctx *gcp.Context) (bool, error) {
 	if err != nil || !yarn2 {
 		return false, nil
 	}
-	linker := ctx.Exec([]string{"yarn", "config", "get", "nodeLinker"}, gcp.WithUserAttribution).Stdout
+	result, err := ctx.Exec([]string{"yarn", "config", "get", "nodeLinker"}, gcp.WithUserAttribution)
+	if err != nil {
+		return false, err
+	}
+	linker := result.Stdout
 	return linker == "pnp", nil
 }

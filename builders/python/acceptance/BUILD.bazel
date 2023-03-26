@@ -1,0 +1,105 @@
+load("//internal/acceptance:defs.bzl", "acceptance_test_argo_source", "acceptance_test_suite")
+load(":args.bzl", "pythonargs")
+
+licenses(["notice"])
+
+exports_files([
+    "config.yaml",
+    "args.bzl",
+])
+
+test_suite(
+    # run all tests in this BUILD
+    name = "acceptance_test",
+)
+
+VERSION_PYTHON37 = "3.7.12"
+
+VERSION_PYTHON38 = "3.8.12"
+
+VERSION_PYTHON39 = "3.9.10"
+
+VERSION_PYTHON310 = "3.10.4"
+
+VERSION_PYTHON311 = "3.11.0"
+
+VERSIONS_ALL = [
+    VERSION_PYTHON37,
+    VERSION_PYTHON38,
+    VERSION_PYTHON39,
+    VERSION_PYTHON310,
+    VERSION_PYTHON311,
+]
+
+VERSIONS_WITH_GCP_SUPPORT = VERSIONS_ALL
+
+VERSIONS_WITH_GAE_SUPPORT = VERSIONS_ALL
+
+VERSIONS_WITH_GCF_SUPPORT = VERSIONS_ALL
+
+VERSIONS_WITH_FLEX_SUPPORT = [
+    VERSION_PYTHON38,
+    VERSION_PYTHON39,
+    VERSION_PYTHON310,
+]
+
+acceptance_test_suite(
+    name = "gcp_test",
+    srcs = [
+        "gcp_test.go",
+    ],
+    builder = "//builders/python:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/python:generic",
+    versions = VERSIONS_WITH_GCP_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "gae_test",
+    srcs = [
+        "gae_test.go",
+    ],
+    argsmap = pythonargs(),
+    builder = "//builders/python:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/python:appengine",
+    versions = VERSIONS_WITH_GAE_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "gcf_test",
+    srcs = [
+        "gcf_test.go",
+    ],
+    builder = "//builders/python:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/python:functions",
+    versions = VERSIONS_WITH_GCF_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "flex_test",
+    srcs = ["flex_test.go"],
+    builder = "//builders/python:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/python:flex",
+    versions = VERSIONS_WITH_FLEX_SUPPORT,
+)
+
+acceptance_test_argo_source(
+    name = "argo_source",
+    testdata = "//builders/testdata:python",
+)
+
+# Test the run image tagged as ${_CANDIDATE_NAME} in gae-runtimes-private.
+acceptance_test_suite(
+    name = "gae_candidate_test",
+    srcs = [
+        "gae_test.go",
+    ],
+    argsmap = pythonargs("$${_CANDIDATE_NAME}"),
+    builder = "//builders/python:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/python:appengine",
+    versions = VERSIONS_WITH_GAE_SUPPORT,
+)

@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "ruby",
+    version = "0.0.1",
     visibility = [
         "//builders:ruby_builders",
     ],
@@ -24,7 +26,9 @@ go_binary(
         "-w",
     ],
     deps = [
+        "//pkg/env",
         "//pkg/gcpbuildpack",
+        "//pkg/nodejs",
         "//pkg/ruby",
         "//pkg/runtime",
     ],

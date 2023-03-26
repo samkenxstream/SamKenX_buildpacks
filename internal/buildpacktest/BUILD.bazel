@@ -8,12 +8,10 @@ go_library(
     name = "buildpacktest",
     testonly = 1,
     srcs = ["buildpacktest.go"],
-    data = [
-        "//internal/buildpacktest/mockprocess",
-    ],
     importpath = "github.com/GoogleCloudPlatform/buildpacks/" + package_name(),
     deps = [
         "//internal/buildpacktestenv",
+        "//internal/mockprocess",
         "//pkg/env",
         "//pkg/fileutil",
         "//pkg/gcpbuildpack",

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/appengine"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/golang"
@@ -38,6 +39,9 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if !env.IsGAE() {
+		return appengine.OptOutTargetPlatformNotGAE(), nil
+	}
 	goModExists, err := ctx.FileExists("go.mod")
 	if err != nil {
 		return nil, err
@@ -91,7 +95,9 @@ func buildFn(ctx *gcp.Context) error {
 		return fmt.Errorf("creating srv layer: %w", err)
 	}
 	srvl.BuildEnvironment.Override(golang.BuildDirEnv, srvl.Path)
-	ctx.Exec([]string{"cp", "--dereference", "-R", ".", srvl.Path}, gcp.WithUserTimingAttribution)
+	if _, err := ctx.Exec([]string{"cp", "--dereference", "-R", ".", srvl.Path}, gcp.WithUserTimingAttribution); err != nil {
+		return err
+	}
 
 	return nil
 }

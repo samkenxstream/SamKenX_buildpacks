@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/appengine"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 )
@@ -34,6 +35,9 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if !env.IsGAE() {
+		return appengine.OptOutTargetPlatformNotGAE(), nil
+	}
 	goModExists, err := ctx.FileExists("go.mod")
 	if err != nil {
 		return nil, err
@@ -130,8 +134,9 @@ func buildFn(ctx *gcp.Context) error {
 	return nil
 }
 
-func copyDir(ctx *gcp.Context, src, dst string) {
+func copyDir(ctx *gcp.Context, src, dst string) error {
 	// Trailing "/." copies the contents of src directory, but not src itself.
 	src = filepath.Clean(src) + string(filepath.Separator) + "."
-	ctx.Exec([]string{"cp", "--dereference", "-R", src, dst}, gcp.WithUserTimingAttribution)
+	_, err := ctx.Exec([]string{"cp", "--dereference", "-R", src, dst}, gcp.WithUserTimingAttribution)
+	return err
 }

@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,7 @@ func init() {
 }
 
 func TestAcceptanceGoFn(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.Test{
@@ -47,7 +47,7 @@ func TestAcceptanceGoFn(t *testing.T) {
 		},
 		{
 			Name: "vendored function without framwork",
-			App:  "no_framework_vendored",
+			App:  "no_framework_vendored_no_go_mod",
 			Path: "/Func",
 			// Use Go 1.13 because Go 1.14 requires a go.mod file.
 			Env:        []string{"GOOGLE_FUNCTION_TARGET=Func", "GOOGLE_RUNTIME_VERSION=1.13.8"},
@@ -68,7 +68,7 @@ func TestAcceptanceGoFn(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestApp(t, builder, tc)
+			acceptance.TestApp(t, imageCtx, tc)
 		})
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/cache"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/buildpacks/libcnb"
 	"github.com/Masterminds/semver"
@@ -34,6 +35,8 @@ const (
 	EnvDevelopment = "development"
 	// EnvProduction represents a NODE_ENV production value.
 	EnvProduction = "production"
+	// EnvNodeVersion can be used to specify the version of Node.js is used for an app.
+	EnvNodeVersion = "GOOGLE_NODEJS_VERSION"
 
 	nodeVersionKey    = "node_version"
 	dependencyHashKey = "dependency_hash"
@@ -41,6 +44,10 @@ const (
 
 // semVer11 is the smallest possible semantic version with major version 11.
 var semVer11 = semver.MustParse("11.0.0")
+
+var (
+	cachedPackageJSONs = map[string]*PackageJSON{}
+)
 
 type packageEnginesJSON struct {
 	Node string `json:"node"`
@@ -87,35 +94,51 @@ func ReadPackageJSONIfExists(dir string) (*PackageJSON, error) {
 
 // HasGCPBuild returns true if the given directory contains a package.json file that includes a
 // non-empty "gcp-build" script.
-func HasGCPBuild(dir string) (bool, error) {
-	p, err := ReadPackageJSONIfExists(dir)
-	if err != nil || p == nil {
-		return false, err
-	}
-	return p.Scripts.GCPBuild != "", nil
+func HasGCPBuild(p *PackageJSON) bool {
+	return p != nil && p.Scripts.GCPBuild != ""
 }
 
 // HasDevDependencies returns true if the given directory contains a package.json file that lists
 // more one or more devDependencies.
-func HasDevDependencies(dir string) (bool, error) {
-	p, err := ReadPackageJSONIfExists(dir)
-	if err != nil || p == nil {
-		return false, err
+func HasDevDependencies(p *PackageJSON) bool {
+	return p != nil && len(p.DevDependencies) > 0
+}
+
+// RequestedNodejsVersion returns any customer provided Node.js version constraint by inspecting the
+// environment and the package.json.
+func RequestedNodejsVersion(ctx *gcp.Context, pjs *PackageJSON) (string, error) {
+	if version := os.Getenv(EnvNodeVersion); version != "" {
+		ctx.Logf("Using runtime version from %s: %s", EnvNodeVersion, version)
+		return version, nil
 	}
-	return len(p.DevDependencies) > 0, nil
+	if version := os.Getenv(env.RuntimeVersion); version != "" {
+		ctx.Logf("Using runtime version from %s: %s", env.RuntimeVersion, version)
+		return version, nil
+	}
+	if pjs == nil {
+		return "", nil
+	}
+	return pjs.Engines.Node, nil
 }
 
 // nodeVersion returns the installed version of Node.js.
 // It can be overridden for testing.
-var nodeVersion = func(ctx *gcp.Context) string {
-	result := ctx.Exec([]string{"node", "-v"})
-	return result.Stdout
+var nodeVersion = func(ctx *gcp.Context) (string, error) {
+	result, err := ctx.Exec([]string{"node", "-v"})
+	if err != nil {
+		return "", err
+	}
+	return result.Stdout, nil
 }
 
 // isPreNode11 returns true if the installed version of Node.js is
 // v10.x.x or older.
 func isPreNode11(ctx *gcp.Context) (bool, error) {
-	version, err := semver.NewVersion(nodeVersion(ctx))
+	nodeVer, err := nodeVersion(ctx)
+	if err != nil {
+		return false, err
+	}
+	version, err := semver.NewVersion(nodeVer)
 	if err != nil {
 		return false, gcp.InternalErrorf("failed to detect valid Node.js version %s: %v", version, err)
 	}
@@ -131,9 +154,13 @@ func NodeEnv() string {
 	return nodeEnv
 }
 
-// CheckCache checks whether cached dependencies exist and match.
-func CheckCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, error) {
-	currentNodeVersion := nodeVersion(ctx)
+// CheckOrClearCache checks whether cached dependencies exist and match. If they do not match, the
+// layer is cleared and the layer metadata is updated with the new cache key.
+func CheckOrClearCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, error) {
+	currentNodeVersion, err := nodeVersion(ctx)
+	if err != nil {
+		return false, err
+	}
 	opts = append(opts, cache.WithStrings(currentNodeVersion))
 	currentDependencyHash, err := cache.Hash(ctx, opts...)
 	if err != nil {
@@ -145,6 +172,7 @@ func CheckCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, 
 	ctx.Debugf("Current dependency hash: %q", currentDependencyHash)
 	ctx.Debugf("  Cache dependency hash: %q", metaDependencyHash)
 	if currentDependencyHash == metaDependencyHash {
+		ctx.CacheHit(l.Name)
 		ctx.Logf("Dependencies cache hit, skipping installation.")
 		return true, nil
 	}
@@ -152,7 +180,11 @@ func CheckCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, 
 	if metaDependencyHash == "" {
 		ctx.Debugf("No metadata found from a previous build, skipping cache.")
 	}
-	ctx.Logf("Installing application dependencies.")
+
+	ctx.CacheMiss(l.Name)
+	if err := ctx.ClearLayer(l); err != nil {
+		return false, fmt.Errorf("clearing layer: %v", err)
+	}
 
 	// Update the layer metadata.
 	ctx.SetMetadata(l, dependencyHashKey, currentDependencyHash)
@@ -163,8 +195,12 @@ func CheckCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, 
 
 // SkipSyntaxCheck returns true if we should skip checking the user's function file for syntax errors
 // if it is impacted by https://github.com/GoogleCloudPlatform/functions-framework-nodejs/issues/407.
-func SkipSyntaxCheck(ctx *gcp.Context, file string) (bool, error) {
-	version, err := semver.NewVersion(nodeVersion(ctx))
+func SkipSyntaxCheck(ctx *gcp.Context, file string, pjs *PackageJSON) (bool, error) {
+	nodeVer, err := nodeVersion(ctx)
+	if err != nil {
+		return false, err
+	}
+	version, err := semver.NewVersion(nodeVer)
 	if err != nil {
 		return false, gcp.InternalErrorf("failed to detect valid Node.js version %s: %v", version, err)
 	}
@@ -174,6 +210,12 @@ func SkipSyntaxCheck(ctx *gcp.Context, file string) (bool, error) {
 	if strings.HasSuffix(file, ".mjs") {
 		return true, nil
 	}
-	pjs, err := ReadPackageJSONIfExists(ctx.ApplicationRoot())
-	return (pjs != nil && pjs.Type == "module"), err
+	return (pjs != nil && pjs.Type == "module"), nil
+}
+
+// IsNodeJS8Runtime returns true when the GOOGLE_RUNTIME is nodejs8. This will be
+// true when using GCF or GAE with nodejs8. This function is useful for some
+// legacy behavior in GCF.
+func IsNodeJS8Runtime() bool {
+	return os.Getenv(env.Runtime) == "nodejs8"
 }

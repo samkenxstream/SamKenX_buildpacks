@@ -1,4 +1,4 @@
-# Test data for function builder acceptance tests.
+# Test data for go builder acceptance tests.
 
 licenses(["notice"])
 
@@ -6,6 +6,9 @@ package(default_visibility = ["//builders:__subpackages__"])
 
 exports_files(
     [
+        "appengine",
+        "flex",
         "functions",
+        "generic",
     ],
 )

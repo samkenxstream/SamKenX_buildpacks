@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "utils",
+    version = "0.0.1",
     visibility = [
         "//builders:php_builders",
     ],
@@ -26,6 +28,7 @@ go_binary(
     deps = [
         "//pkg/gcpbuildpack",
         "//pkg/runtime",
+        "@com_github_buildpacks_libcnb//:go_default_library",
     ],
 )
 

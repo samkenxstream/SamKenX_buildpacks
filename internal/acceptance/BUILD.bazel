@@ -2,10 +2,15 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 licenses(["notice"])
 
+exports_files([
+    "defs.bzl",
+])
+
 go_library(
     name = "acceptance",
     srcs = [
         "acceptance.go",
+        "environment.go",
         "structure.go",
     ],
     importpath = "github.com/GoogleCloudPlatform/buildpacks/" + package_name(),
@@ -14,7 +19,10 @@ go_library(
     ],
     deps = [
         "//internal/checktools",
+        "//pkg/env",
+        "//pkg/runtime",
         "@com_github_burntsushi_toml//:go_default_library",
+        "@com_github_masterminds_semver//:go_default_library",
         "@com_github_rs_xid//:go_default_library",
     ],
 )

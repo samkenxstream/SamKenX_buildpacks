@@ -5,7 +5,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   uri = "entrypoint.tgz"
 
 [[buildpacks]]
-  id = "google.cpp.clear_source"
+  id = "google.cpp.clear-source"
   uri = "cpp/clear_source.tgz"
 
 [[buildpacks]]
@@ -29,6 +29,10 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   uri = "dotnet/runtime.tgz"
 
 [[buildpacks]]
+  id = "google.dotnet.sdk"
+  uri = "dotnet/sdk.tgz"
+
+[[buildpacks]]
   id = "google.dotnet.publish"
   uri = "dotnet/publish.tgz"
 
@@ -37,7 +41,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   uri = "dotnet/functions_framework.tgz"
 
 [[buildpacks]]
-  id = "google.go.clear_source"
+  id = "google.go.clear-source"
   uri = "go/clear_source.tgz"
 
 [[buildpacks]]
@@ -93,7 +97,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   uri = "java/runtime.tgz"
 
 [[buildpacks]]
-  id = "google.java.clear_source"
+  id = "google.java.clear-source"
   uri = "java/clear_source.tgz"
 
 [[buildpacks]]
@@ -129,12 +133,16 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   uri = "python/missing_entrypoint.tgz"
 
 [[buildpacks]]
-  id = "google.utils.label"
-  uri = "label.tgz"
+  id = "google.utils.label-image"
+  uri = "label_image.tgz"
 
 [[buildpacks]]
   id = "google.ruby.runtime"
   uri = "ruby/runtime.tgz"
+
+[[buildpacks]]
+  id = "google.ruby.rubygems"
+  uri = "ruby/rubygems.tgz"
 
 [[buildpacks]]
   id = "google.ruby.bundle"
@@ -156,6 +164,26 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   id = "google.python.webserver"
   uri = "webserver.tgz"
 
+[[buildpacks]]
+  id = "google.php.composer"
+  uri = "php/composer.tgz"
+
+[[buildpacks]]
+  id = "google.php.composer-install"
+  uri = "php/composer_install.tgz"
+
+[[buildpacks]]
+  id = "google.php.runtime"
+  uri = "php/runtime.tgz"
+
+[[buildpacks]]
+  id = "google.php.webconfig"
+  uri = "php/webconfig.tgz"
+
+[[buildpacks]]
+  id = "google.utils.nginx"
+  uri = "nginx.tgz"
+
 ########
 # .NET #
 ########
@@ -163,21 +191,24 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
 [[order]]
 
   [[order.group]]
+    id = "google.dotnet.sdk"
+
+  [[order.group]]
     id = "google.dotnet.functions-framework"
     optional = true
 
   [[order.group]]
-    id = "google.dotnet.runtime"
+    id = "google.dotnet.publish"
 
   [[order.group]]
-    id = "google.dotnet.publish"
+    id = "google.dotnet.runtime"
 
   [[order.group]]
     id = "google.config.entrypoint"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Prebuilt .NET applications.
 [[order]]
@@ -189,7 +220,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ########
 # Dart #
@@ -227,11 +258,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.go.clear_source"
+    id = "google.go.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
 
@@ -249,11 +280,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.go.clear_source"
+    id = "google.go.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
 
@@ -272,11 +303,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.go.clear_source"
+    id = "google.go.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ########
 # Java #
@@ -301,11 +332,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 
 # Functions have separate groups because entrypoint not supported.
@@ -320,11 +351,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.java.functions-framework"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
   [[order.group]]
@@ -338,11 +369,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.java.functions-framework"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Exploded Jars
 [[order]]
@@ -353,7 +384,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.java.exploded-jar"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Maven applications.
 [[order]]
@@ -367,11 +398,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
   [[order.group]]
@@ -384,11 +415,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.java.entrypoint"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Gradle & Jar-based applications.
 [[order]]
@@ -403,11 +434,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
   [[order.group]]
@@ -421,11 +452,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.java.entrypoint"
 
   [[order.group]]
-    id = "google.java.clear_source"
+    id = "google.java.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ##############
 # Python 1/2 #
@@ -451,7 +482,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Python functions.
 [[order]]
@@ -470,7 +501,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Python applications.
 # Entrypoint buildpack is required because it cannot be easily inferred.
@@ -486,19 +517,28 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ###########
 # Ruby applications #
 ###########
 # Ruby applications.
 # Entrypoint buildpack is required because it cannot be easily inferred.
+# The Node.js buildpack is required for Rails asset precompilation.
 [[order]]
   [[order.group]]
     id = "google.ruby.runtime"
 
   [[order.group]]
+    id = "google.ruby.rubygems"
+    optional = true
+
+  [[order.group]]
     id = "google.ruby.bundle"
+    optional = true
+
+  [[order.group]]
+    id = "google.nodejs.runtime"
     optional = true
 
   [[order.group]]
@@ -509,8 +549,35 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
+#######
+# PHP #
+#######
+[[order]]
+  [[order.group]]
+    id = "google.php.runtime"
+
+  [[order.group]]
+    id = "google.utils.nginx"
+
+  [[order.group]]
+    id = "google.php.composer-install"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.composer"
+    optional = true
+
+  [[order.group]]
+    id = "google.utils.label-image"
+
+  [[order.group]]
+    id = "google.config.entrypoint"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.webconfig"
 
 ###########
 # Node.js #
@@ -535,7 +602,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 [[order]]
   [[order.group]]
@@ -553,7 +620,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Separate groups for Node.js projects without dependencies.
 # Making both yarn and npm optional in the previous groups leads
@@ -572,7 +639,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 # Node.js applications without a package.json.
 # Entrypoint is required because it cannot be read from package.json.
@@ -584,7 +651,7 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.config.entrypoint"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ########
 # C++  #
@@ -600,11 +667,11 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
     id = "google.cpp.functions-framework"
 
   [[order.group]]
-    id = "google.cpp.clear_source"
+    id = "google.cpp.clear-source"
     optional = true
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.utils.label-image"
 
 ##############
 # Python 2/2 #
@@ -631,4 +698,4 @@ description = "Ubuntu 18 base image with buildpacks for .NET, Go, Java, Node.js,
   run-image = "gcr.io/buildpacks/gcp/run:v1"
 
 [lifecycle]
-  version = "0.13.3"
+  version = "0.16.0"

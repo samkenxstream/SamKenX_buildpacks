@@ -21,18 +21,16 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/ar"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/cache"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/devmode"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/nodejs"
-	"github.com/buildpacks/libcnb"
 )
 
 const (
-	cacheTag   = "prod dependencies"
-	yarnLayer  = "yarn_engine"
-	versionKey = "version"
-	yarnURL    = "https://yarnpkg.com/downloads/%[1]s/yarn-v%[1]s.tar.gz"
+	cacheTag  = "prod dependencies"
+	yarnLayer = "yarn_engine"
 )
 
 func main() {
@@ -40,13 +38,6 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	yarnLockExists, err := ctx.FileExists(nodejs.YarnLock)
-	if err != nil {
-		return nil, err
-	}
-	if !yarnLockExists {
-		return gcp.OptOutFileNotFound("yarn.lock"), nil
-	}
 	pkgJSONExists, err := ctx.FileExists("package.json")
 	if err != nil {
 		return nil, err
@@ -55,22 +46,34 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 		return gcp.OptOutFileNotFound("package.json"), nil
 	}
 
+	yarnLockExists, err := ctx.FileExists(nodejs.YarnLock)
+	if err != nil {
+		return nil, err
+	}
+	if !yarnLockExists {
+		return gcp.OptOutFileNotFound("yarn.lock"), nil
+	}
+
 	return gcp.OptIn("found yarn.lock and package.json"), nil
 }
 
 func buildFn(ctx *gcp.Context) error {
-	if err := installYarn(ctx); err != nil {
+	pjs, err := nodejs.ReadPackageJSONIfExists(ctx.ApplicationRoot())
+	if err != nil {
+		return err
+	}
+	if err := installYarn(ctx, pjs); err != nil {
 		return fmt.Errorf("installing Yarn: %w", err)
 	}
 
 	if yarn2, err := nodejs.IsYarn2(ctx.ApplicationRoot()); err != nil {
 		return err
 	} else if yarn2 {
-		if err := yarn2InstallModules(ctx); err != nil {
+		if err := yarn2InstallModules(ctx, pjs); err != nil {
 			return err
 		}
 	} else {
-		if err := yarn1InstallModules(ctx); err != nil {
+		if err := yarn1InstallModules(ctx, pjs); err != nil {
 			return err
 		}
 	}
@@ -102,7 +105,7 @@ func buildFn(ctx *gcp.Context) error {
 	return nil
 }
 
-func yarn1InstallModules(ctx *gcp.Context) error {
+func yarn1InstallModules(ctx *gcp.Context, pjs *nodejs.PackageJSON) error {
 	freezeLockfile, err := nodejs.UseFrozenLockfile(ctx)
 	if err != nil {
 		return err
@@ -112,21 +115,14 @@ func yarn1InstallModules(ctx *gcp.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating layer: %w", err)
 	}
-	cached, err := nodejs.CheckCache(ctx, ml, cache.WithFiles("package.json", nodejs.YarnLock))
+
+	if err := ar.GenerateNPMConfig(ctx); err != nil {
+		return fmt.Errorf("generating Artifact Registry credentials: %w", err)
+	}
+
+	_, err = nodejs.CheckOrClearCache(ctx, ml, cache.WithFiles("package.json", nodejs.YarnLock))
 	if err != nil {
 		return fmt.Errorf("checking cache: %w", err)
-	}
-	if cached {
-		// The yarn.lock hasn't been updated since we last built so the cached node_modules should be
-		// up-to-date.
-		ctx.CacheHit(cacheTag)
-	} else {
-		// The dependencies listed in the yarn.lock file have changed. Clear the layer cache and update
-		// it after we run yarn install
-		ctx.CacheMiss(cacheTag)
-		if err := ctx.ClearLayer(ml); err != nil {
-			return fmt.Errorf("clearing layer %q: %w", ml.Name, err)
-		}
 	}
 
 	// Use Yarn's --modules-folder flag to install directly into the layer and then symlink them into
@@ -167,10 +163,7 @@ func yarn1InstallModules(ctx *gcp.Context) error {
 	if freezeLockfile {
 		cmd = append(cmd, "--frozen-lockfile")
 	}
-	gcpBuild, err := nodejs.HasGCPBuild(ctx.ApplicationRoot())
-	if err != nil {
-		return err
-	}
+	gcpBuild := nodejs.HasGCPBuild(pjs)
 	if gcpBuild {
 		// Setting --production=false causes the devDependencies to be installed regardless of the
 		// NODE_ENV value. The allows the customer's lifecycle hooks to access to them. We purge the
@@ -180,10 +173,14 @@ func yarn1InstallModules(ctx *gcp.Context) error {
 
 	// Add the layer's node_modules/.bin to the path so it is available in postinstall scripts.
 	nodeBin := filepath.Join(layerModules, ".bin")
-	ctx.Exec(cmd, gcp.WithUserAttribution, gcp.WithEnv(fmt.Sprintf("PATH=%s:%s", os.Getenv("PATH"), nodeBin)))
+	if _, err := ctx.Exec(cmd, gcp.WithUserAttribution, gcp.WithEnv(fmt.Sprintf("PATH=%s:%s", os.Getenv("PATH"), nodeBin))); err != nil {
+		return err
+	}
 
 	if gcpBuild {
-		ctx.Exec([]string{"yarn", "run", "gcp-build"}, gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"yarn", "run", "gcp-build"}, gcp.WithUserAttribution); err != nil {
+			return err
+		}
 
 		// If there was a gcp-build script we installed all the devDependencies above. We should try to
 		// prune them from the final app image.
@@ -197,16 +194,21 @@ func yarn1InstallModules(ctx *gcp.Context) error {
 			if freezeLockfile {
 				cmd = append(cmd, "--frozen-lockfile")
 			}
-			ctx.Exec(cmd, gcp.WithUserAttribution)
+			if _, err := ctx.Exec(cmd, gcp.WithUserAttribution); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-func yarn2InstallModules(ctx *gcp.Context) error {
-	cmd := []string{"yarn", "install", "--immutable"}
+func yarn2InstallModules(ctx *gcp.Context, pjs *nodejs.PackageJSON) error {
+	if err := ar.GenerateYarnConfig(ctx); err != nil {
+		return fmt.Errorf("generating Artifact Registry credentials: %w", err)
+	}
 
+	cmd := []string{"yarn", "install", "--immutable"}
 	yarnCacheExists, err := ctx.FileExists(ctx.ApplicationRoot(), ".yarn", "cache")
 	if err != nil {
 		return err
@@ -217,74 +219,47 @@ func yarn2InstallModules(ctx *gcp.Context) error {
 	if yarnCacheExists {
 		cmd = append(cmd, "--immutable-cache")
 	}
-	ctx.Exec(cmd, gcp.WithUserAttribution)
+	if _, err := ctx.Exec(cmd, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 
 	// Run the gcp-build script if it exists.
-	if gcpBuild, err := nodejs.HasGCPBuild(ctx.ApplicationRoot()); err != nil {
-		return err
-	} else if gcpBuild {
-		ctx.Exec([]string{"yarn", "run", "gcp-build"}, gcp.WithUserAttribution)
+	if nodejs.HasGCPBuild(pjs) {
+		if _, err := ctx.Exec([]string{"yarn", "run", "gcp-build"}, gcp.WithUserAttribution); err != nil {
+			return err
+		}
 	}
 
 	// If there are no devDependencies, there is nothing to prune. We are done.
-	if devDeps, err := nodejs.HasDevDependencies(ctx.ApplicationRoot()); err != nil || !devDeps {
-		return err
+	if !nodejs.HasDevDependencies(pjs) {
+		return nil
 	}
 
 	nodeEnv := nodejs.NodeEnv()
-	switch {
-	case nodeEnv != nodejs.EnvProduction:
+	if nodeEnv != nodejs.EnvProduction {
 		ctx.Logf("Retaining devDependencies because NODE_ENV=%q", nodeEnv)
-	case !nodejs.HasYarnWorkspacePlugin(ctx):
-		ctx.Warnf("Keeping devDependencies because the Yarn workspace-tools plugin is not installed. You can add it to your project by running 'yarn plugin import workspace-tools'")
-	default:
-		// For Yarn2, dependency pruning is via the workspaces plugin.
-		ctx.Logf("Pruning devDependencies")
-		ctx.Exec([]string{"yarn", "workspaces", "focus", "--all", "--production"}, gcp.WithUserAttribution)
+		return nil
 	}
-
-	return nil
-}
-
-func installYarn(ctx *gcp.Context) error {
-	version, err := nodejs.DetectYarnVersion(ctx.ApplicationRoot())
+	hasWorkPlugin, err := nodejs.HasYarnWorkspacePlugin(ctx)
 	if err != nil {
 		return err
 	}
+	if !hasWorkPlugin {
+		ctx.Warnf("Keeping devDependencies because the Yarn workspace-tools plugin is not installed. You can add it to your project by running 'yarn plugin import workspace-tools'")
+		return nil
+	}
+	// For Yarn2, dependency pruning is via the workspaces plugin.
+	ctx.Logf("Pruning devDependencies")
+	if _, err := ctx.Exec([]string{"yarn", "workspaces", "focus", "--all", "--production"}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
+	return nil
+}
 
+func installYarn(ctx *gcp.Context, pjs *nodejs.PackageJSON) error {
 	yrl, err := ctx.Layer(yarnLayer, gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayer)
 	if err != nil {
 		return fmt.Errorf("creating %v layer: %w", yarnLayer, err)
 	}
-	// Check the metadata in the cache layer to determine if we need to proceed.
-	metaVersion := ctx.GetMetadata(yrl, versionKey)
-	if version == metaVersion {
-		ctx.CacheHit(yarnLayer)
-		ctx.Logf("Yarn cache hit, skipping installation.")
-	} else {
-		ctx.CacheMiss(yarnLayer)
-		if err := ctx.ClearLayer(yrl); err != nil {
-			return fmt.Errorf("clearing layer %q: %w", yrl.Name, err)
-		}
-		// Download and install yarn in layer.
-		ctx.Logf("Installing Yarn v%s", version)
-		archiveURL := fmt.Sprintf(yarnURL, version)
-		command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s --strip-components=1", archiveURL, yrl.Path)
-		ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution)
-	}
-
-	// Store layer flags and metadata.
-	ctx.SetMetadata(yrl, versionKey, version)
-	// We need to update the path here to ensure the version we just installed take precendence over
-	// anything pre-installed in the base image.
-	if err := ctx.Setenv("PATH", filepath.Join(yrl.Path, "bin")+":"+os.Getenv("PATH")); err != nil {
-		return err
-	}
-	ctx.AddBOMEntry(libcnb.BOMEntry{
-		Name:     yarnLayer,
-		Metadata: map[string]interface{}{"version": version},
-		Launch:   true,
-		Build:    true,
-	})
-	return nil
+	return nodejs.InstallYarnLayer(ctx, yrl, pjs)
 }

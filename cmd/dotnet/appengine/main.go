@@ -30,7 +30,10 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	return gcp.OptInAlways(), nil
+	if env.IsGAE() {
+		return appengine.OptInTargetPlatformGAE(), nil
+	}
+	return appengine.OptOutTargetPlatformNotGAE(), nil
 }
 
 func buildFn(ctx *gcp.Context) error {

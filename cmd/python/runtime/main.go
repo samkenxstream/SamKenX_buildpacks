@@ -18,37 +18,31 @@ package main
 
 import (
 	"fmt"
-	"net/http"
-	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/python"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
-	"github.com/buildpacks/libcnb"
 )
 
 const (
 	pythonLayer = "python"
-	pythonURL   = "https://storage.googleapis.com/gcp-buildpacks/python/python-%s.tar.gz"
-	// TODO(b/148375706): Add mapping for stable/beta versions.
-	versionURL  = "https://storage.googleapis.com/gcp-buildpacks/python/latest.version"
-	versionFile = ".python-version"
-	versionKey  = "version"
-	versionEnv  = "GOOGLE_PYTHON_VERSION"
 )
+
+var execPrefixRegex = regexp.MustCompile(`exec_prefix\s*=\s*"([^"]+)`)
 
 func main() {
 	gcp.Main(detectFn, buildFn)
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	if result := runtime.CheckOverride(ctx, "python"); result != nil {
+	if result := runtime.CheckOverride("python"); result != nil {
 		return result, nil
 	}
-
-	atLeastOne, err := ctx.HasAtLeastOne("*.py")
+	atLeastOne, err := ctx.HasAtLeastOneOutsideDependencyDirectories("*.py")
 	if err != nil {
 		return nil, fmt.Errorf("finding *.py files: %w", err)
 	}
@@ -58,98 +52,65 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 	return gcp.OptIn("found .py files"), nil
 }
 
-func legacyInstallPython(ctx *gcp.Context, layer *libcnb.Layer) (bool, error) {
-	version, err := runtimeVersion(ctx)
-	if err != nil {
-		return false, fmt.Errorf("determining runtime version: %w", err)
-	}
-	ctx.AddBOMEntry(libcnb.BOMEntry{
-		Name:     pythonLayer,
-		Metadata: map[string]interface{}{"version": version},
-		Launch:   true,
-		Build:    true,
-	})
-
-	// Check the metadata in the cache layer to determine if we need to proceed.
-	metaVersion := ctx.GetMetadata(layer, versionKey)
-	if version == metaVersion {
-		ctx.CacheHit(pythonLayer)
-		return true, nil
-	}
-	ctx.CacheMiss(pythonLayer)
-	if err := ctx.ClearLayer(layer); err != nil {
-		return false, fmt.Errorf("clearing layer %q: %w", layer.Name, err)
-	}
-
-	archiveURL := fmt.Sprintf(pythonURL, version)
-	code, err := ctx.HTTPStatus(archiveURL)
-	if err != nil {
-		return false, err
-	}
-	if code != http.StatusOK {
-		return false, gcp.UserErrorf("Runtime version %s does not exist at %s (status %d). You can specify the version with %s.", version, archiveURL, code, env.RuntimeVersion)
-	}
-
-	ctx.Logf("Installing Python v%s", version)
-	command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s", archiveURL, layer.Path)
-	ctx.Exec([]string{"bash", "-c", command})
-
-	ctx.SetMetadata(layer, versionKey, version)
-	return false, nil
-}
-
 func buildFn(ctx *gcp.Context) error {
-	layer, err := ctx.Layer(pythonLayer, gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayerUnlessSkipRuntimeLaunch)
+	// We don't cache the python runtime because the python/link-runtime buildpack may clobber
+	// everything in the layer directory anyway.
+	layer, err := ctx.Layer(pythonLayer, gcp.BuildLayer, gcp.LaunchLayer)
+	ctx.Logf("layers path: %s", layer.Path)
 	if err != nil {
 		return fmt.Errorf("creating %v layer: %w", pythonLayer, err)
 	}
-	isCached, err := installPython(ctx, layer)
+	ver, err := python.RuntimeVersion(ctx, ctx.ApplicationRoot())
+	if err != nil {
+		return fmt.Errorf("determining runtime version: %w", err)
+	}
+	if _, err := runtime.InstallTarballIfNotCached(ctx, runtime.Python, ver, layer); err != nil {
+		return err
+	}
+	// replace python sysconfig variable prefix from "/opt/python" to "/layers/google.python.runtime/python/" which is the layer.Path
+	// python is installed in /layers/google.python.runtime/python/ for unified builder,
+	// while the python downloaded from debs is installed in "/opt/python".
+	sysconfig, _ := ctx.Exec([]string{filepath.Join(layer.Path, "bin/python3"), "-m", "sysconfig"}, gcp.WithUserAttribution)
+	execPrefix, err := parseExecPrefix(sysconfig.Stdout)
 	if err != nil {
 		return err
 	}
-	if !isCached {
-		// Force stdout/stderr streams to be unbuffered so that log messages appear immediately in the logs.
-		layer.LaunchEnvironment.Default("PYTHONUNBUFFERED", "TRUE")
-
-		ctx.Logf("Upgrading pip to the latest version and installing build tools")
-		path := filepath.Join(layer.Path, "bin/python3")
-		ctx.Exec([]string{path, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"}, gcp.WithUserAttribution)
+	result, _ := ctx.Exec([]string{
+		"grep",
+		"-rlI",
+		execPrefix,
+		layer.Path,
+	}, gcp.WithUserAttribution)
+	paths := strings.Split(result.Stdout, "\n")
+	for _, path := range paths {
+		ctx.Exec([]string{
+			"sed",
+			"-i",
+			"s|" + execPrefix + "|" + layer.Path + "|g",
+			path,
+		}, gcp.WithUserAttribution)
 	}
+
+	// Set the PYTHONHOME for flex apps because of uwsgi
+	if env.IsFlex() {
+		layer.LaunchEnvironment.Default("PYTHONHOME", layer.Path)
+	}
+
+	// Force stdout/stderr streams to be unbuffered so that log messages appear immediately in the logs.
+	layer.LaunchEnvironment.Default("PYTHONUNBUFFERED", "TRUE")
+	ctx.Logf("Upgrading pip to the latest version and installing build tools")
+	path := filepath.Join(layer.Path, "bin/python3")
+	if _, err := ctx.Exec([]string{path, "-m", "pip", "install", "--upgrade", "pip", "setuptools==v64.0.0", "wheel"}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func installPython(ctx *gcp.Context, layer *libcnb.Layer) (bool, error) {
-	ver := os.Getenv(versionEnv)
-	if ver == "" {
-		return legacyInstallPython(ctx, layer)
+func parseExecPrefix(sysconfig string) (string, error) {
+	match := execPrefixRegex.FindStringSubmatch(sysconfig)
+	if len(match) < 2 {
+		return "", fmt.Errorf("determining Python exec prefix: %v", match)
 	}
-	// Use GOOGLE_PYTHON_VERSION to enable installing from the experimental tarball hosting service.
-	return runtime.InstallTarballIfNotCached(ctx, runtime.Python, ver, layer)
-}
-
-func runtimeVersion(ctx *gcp.Context) (string, error) {
-	if v := os.Getenv(env.RuntimeVersion); v != "" {
-		ctx.Logf("Using runtime version from %s: %s", env.RuntimeVersion, v)
-		return v, nil
-	}
-	versionFileExists, err := ctx.FileExists(versionFile)
-	if err != nil {
-		return "", err
-	}
-	if versionFileExists {
-		raw, err := ctx.ReadFile(versionFile)
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimSpace(string(raw))
-		if v != "" {
-			ctx.Logf("Using runtime version from %s: %s", versionFile, v)
-			return v, nil
-		}
-		return "", gcp.UserErrorf("%s exists but does not specify a version", versionFile)
-	}
-	// Intentionally no user-attributed becase the URL is provided by Google.
-	v := ctx.Exec([]string{"curl", "--fail", "--show-error", "--silent", "--location", versionURL}).Stdout
-	ctx.Logf("Using latest runtime version: %s", v)
-	return v, nil
+	return match[1], nil
 }

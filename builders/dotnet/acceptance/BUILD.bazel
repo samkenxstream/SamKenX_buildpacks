@@ -1,0 +1,96 @@
+load("//internal/acceptance:defs.bzl", "acceptance_test_argo_source", "acceptance_test_suite")
+
+licenses(["notice"])
+
+exports_files(["config.yaml"])
+
+test_suite(
+    # run all tests in this BUILD
+    name = "acceptance_test",
+)
+
+VERSION_DOTNET3 = "3.1.426"
+
+VERSION_DOTNET6 = "6.0.300"
+
+VERSION_DOTNET7 = "7.0.100"
+
+VERSIONS_ALL = [
+    VERSION_DOTNET3,
+    VERSION_DOTNET6,
+    VERSION_DOTNET7,
+]
+
+VERSIONS_WITH_GCF_SUPPORT = [
+    VERSION_DOTNET3,
+    VERSION_DOTNET6,
+]
+
+VERSIONS_WITH_GCP_SUPPORT = VERSIONS_ALL
+
+acceptance_test_suite(
+    name = "gcf_test",
+    srcs = [
+        "common_test.go",
+        "gcf_test.go",
+    ],
+    builder = "//builders/dotnet:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/dotnet:functions",
+    versions = VERSIONS_WITH_GCF_SUPPORT,
+    deps = [
+        "@com_github_masterminds_semver//:go_default_library",
+    ],
+)
+
+acceptance_test_suite(
+    name = "gcp_test",
+    srcs = [
+        "common_test.go",
+        "gcp_test.go",
+    ],
+    builder = "//builders/dotnet:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/dotnet:generic",
+    versions = VERSIONS_WITH_GCP_SUPPORT,
+    deps = [
+        "@com_github_masterminds_semver//:go_default_library",
+    ],
+)
+
+# There are no GAE tests for dotnet as there is no dotnet runtime on GAE. However, the language
+# test framework expects a `gae_test` target. For that reason this target exists.
+acceptance_test_suite(
+    name = "gae_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
+    ],
+    builder = "//builders/dotnet:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/dotnet:generic",
+    deps = [
+        "@com_github_masterminds_semver//:go_default_library",
+    ],
+)
+
+# There are no GAE tests for dotnet as there is no dotnet runtime on GAE. However, the language
+# test framework expects a `gae_candidate_test` target. For that reason this target exists.
+acceptance_test_suite(
+    name = "gae_candidate_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
+    ],
+    builder = "//builders/dotnet:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/dotnet:generic",
+    deps = [
+        "@com_github_masterminds_semver//:go_default_library",
+    ],
+)
+
+acceptance_test_argo_source(
+    name = "argo_source",
+    testdata = "//builders/testdata:dotnet",
+)

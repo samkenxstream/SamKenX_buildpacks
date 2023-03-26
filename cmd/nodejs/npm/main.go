@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/ar"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/buildermetrics"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/cache"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/devmode"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
@@ -56,65 +57,78 @@ func buildFn(ctx *gcp.Context) error {
 	if err := ctx.RemoveAll("node_modules"); err != nil {
 		return err
 	}
-
 	if err := ar.GenerateNPMConfig(ctx); err != nil {
 		return fmt.Errorf("generating Artifact Registry credentials: %w", err)
 	}
+
+	pjs, err := nodejs.ReadPackageJSONIfExists(ctx.ApplicationRoot())
+	if err != nil {
+		return err
+	}
+	if err := upgradeNPM(ctx, pjs); err != nil {
+		return err
+	}
+
 	lockfile, err := nodejs.EnsureLockfile(ctx)
 	if err != nil {
 		return err
 	}
 
 	nodeEnv := nodejs.NodeEnv()
-	gcpBuild, err := nodejs.HasGCPBuild(ctx.ApplicationRoot())
-	if err != nil {
-		return err
-	}
+	gcpBuild := nodejs.HasGCPBuild(pjs)
 	if gcpBuild {
 		nodeEnv = nodejs.EnvDevelopment
 	}
-	cached, err := nodejs.CheckCache(ctx, ml, cache.WithStrings(nodeEnv), cache.WithFiles("package.json", lockfile))
+	cached, err := nodejs.CheckOrClearCache(ctx, ml, cache.WithStrings(nodeEnv), cache.WithFiles("package.json", lockfile))
 	if err != nil {
 		return fmt.Errorf("checking cache: %w", err)
 	}
 	if cached {
-		ctx.CacheHit(cacheTag)
 		// Restore cached node_modules.
-		ctx.Exec([]string{"cp", "--archive", nm, "node_modules"}, gcp.WithUserTimingAttribution)
+		if _, err := ctx.Exec([]string{"cp", "--archive", nm, "node_modules"}, gcp.WithUserTimingAttribution); err != nil {
+			return err
+		}
 
 		// Always run npm install to run preinstall/postinstall scripts.
 		// Otherwise it should be a no-op because the lockfile is unchanged.
-		ctx.Exec([]string{"npm", "install", "--quiet"}, gcp.WithEnv("NODE_ENV="+nodeEnv), gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"npm", "install", "--quiet"}, gcp.WithEnv("NODE_ENV="+nodeEnv), gcp.WithUserAttribution); err != nil {
+			return err
+		}
 	} else {
+		ctx.Logf("Installing application dependencies.")
 		installCmd, err := nodejs.NPMInstallCommand(ctx)
 		if err != nil {
 			return err
 		}
-		ctx.CacheMiss(cacheTag)
-		// Clear cached node_modules to ensure we don't end up with outdated dependencies after copying.
-		if err := ctx.ClearLayer(ml); err != nil {
-			return fmt.Errorf("clearing layer %q: %w", ml.Name, err)
-		}
 
-		ctx.Exec([]string{"npm", installCmd, "--quiet"}, gcp.WithEnv("NODE_ENV="+nodeEnv), gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"npm", installCmd, "--quiet"}, gcp.WithEnv("NODE_ENV="+nodeEnv), gcp.WithUserAttribution); err != nil {
+			return err
+		}
 
 		// Ensure node_modules exists even if no dependencies were installed.
 		if err := ctx.MkdirAll("node_modules", 0755); err != nil {
 			return err
 		}
-		ctx.Exec([]string{"cp", "--archive", "node_modules", nm}, gcp.WithUserTimingAttribution)
+		if _, err := ctx.Exec([]string{"cp", "--archive", "node_modules", nm}, gcp.WithUserTimingAttribution); err != nil {
+			return err
+		}
 	}
 
 	if gcpBuild {
-		ctx.Exec([]string{"npm", "run", "gcp-build"}, gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"npm", "run", "gcp-build"}, gcp.WithUserAttribution); err != nil {
+			return err
+		}
+		buildermetrics.GlobalBuilderMetrics().GetCounter(buildermetrics.NpmGcpBuildUsageCounterID).Increment(1)
 
-		shouldPrune, err := shouldPrune(ctx)
+		shouldPrune, err := shouldPrune(ctx, pjs)
 		if err != nil {
 			return err
 		}
 		if shouldPrune {
 			// npm prune deletes devDependencies from node_modules
-			ctx.Exec([]string{"npm", "prune"}, gcp.WithUserAttribution)
+			if _, err := ctx.Exec([]string{"npm", "prune", "--production"}, gcp.WithUserAttribution); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -145,10 +159,10 @@ func buildFn(ctx *gcp.Context) error {
 	return nil
 }
 
-func shouldPrune(ctx *gcp.Context) (bool, error) {
+func shouldPrune(ctx *gcp.Context, pjs *nodejs.PackageJSON) (bool, error) {
 	// if there are no devDependencies, there is no need to prune.
-	if devDeps, err := nodejs.HasDevDependencies(ctx.ApplicationRoot()); err != nil || !devDeps {
-		return false, err
+	if !nodejs.HasDevDependencies(pjs) {
+		return false, nil
 	}
 	if nodeEnv := nodejs.NodeEnv(); nodeEnv != nodejs.EnvProduction {
 		ctx.Logf("Retaining devDependencies because $NODE_ENV=%q.", nodeEnv)
@@ -159,4 +173,36 @@ func shouldPrune(ctx *gcp.Context) (bool, error) {
 		ctx.Warnf("Retaining devDependencies because the version of NPM you are using does not support 'npm prune'.")
 	}
 	return canPrune, err
+}
+
+func upgradeNPM(ctx *gcp.Context, pjs *nodejs.PackageJSON) error {
+	npmVersion, err := nodejs.RequestedNPMVersion(pjs)
+	if err != nil {
+		return err
+	}
+	if npmVersion == "" {
+		// if an NPM version was not requested, use whatever was bundled with Node.js.
+		return nil
+	}
+	npmLayer, err := ctx.Layer("npm", gcp.BuildLayer, gcp.LaunchLayer, gcp.CacheLayer)
+	if err != nil {
+		return fmt.Errorf("creating layer: %w", err)
+	}
+	metaVersion := ctx.GetMetadata(npmLayer, "version")
+	if metaVersion == npmVersion {
+		ctx.Logf("npm@%s cache hit, skipping installation.", npmVersion)
+		return nil
+	}
+	ctx.ClearLayer(npmLayer)
+	prefix := fmt.Sprintf("--prefix=%s", npmLayer.Path)
+	pkg := fmt.Sprintf("npm@%s", npmVersion)
+	if _, err := ctx.Exec([]string{"npm", "install", "-g", prefix, pkg}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
+	// Set the path here to ensure the version we just installed takes precedence over the npm bundled
+	// with the Node.js engine.
+	if err := ctx.Setenv("PATH", filepath.Join(npmLayer.Path, "bin")+":"+os.Getenv("PATH")); err != nil {
+		return err
+	}
+	return nil
 }

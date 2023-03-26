@@ -1,17 +1,21 @@
 licenses(["notice"])
 
-package(
-    default_visibility = ["//:__subpackages__"],
-)
+package(default_visibility = ["//:__subpackages__"])
 
 exports_files([
     "defs.bzl",
+    "buildpack.toml.template",
 ])
 
 # Used in builder macro in defs.bzl.
 sh_binary(
     name = "create_builder",
     srcs = ["create-builder.sh"],
+)
+
+sh_binary(
+    name = "create_buildpackage",
+    srcs = ["create-buildpackage.sh"],
 )
 
 sh_binary(

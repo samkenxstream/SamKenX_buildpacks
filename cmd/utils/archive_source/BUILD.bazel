@@ -10,8 +10,10 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "utils",
+    version = "0.0.1",
     visibility = [
-        "//builders:function_builders",
+        "//builders:__subpackages__",
     ],
 )
 

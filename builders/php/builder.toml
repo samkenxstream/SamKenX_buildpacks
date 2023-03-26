@@ -13,17 +13,94 @@ description = "Unified builder for the PHP runtime"
   uri = "composer_install.tgz"
 
 [[buildpacks]]
+  id = "google.php.composer-gcp-build"
+  uri = "composer_gcp_build.tgz"
+
+[[buildpacks]]
+  id = "google.php.appengine"
+  uri = "appengine.tgz"
+
+[[buildpacks]]
   id = "google.php.runtime"
   uri = "runtime.tgz"
 
 [[buildpacks]]
-  id = "google.utils.label"
-  uri = "label.tgz"
+  id = "google.php.webconfig"
+  uri = "webconfig.tgz"
+
+[[buildpacks]]
+  id = "google.utils.label-image"
+  uri = "label_image.tgz"
 
 [[buildpacks]]
   id = "google.utils.nginx"
   uri = "nginx.tgz"
 
+[[buildpacks]]
+  id = "google.php.functions-framework"
+  uri = "functions_framework.tgz"
+
+[[buildpacks]]
+  id = "google.php.cloudfunctions"
+  uri = "cloudfunctions.tgz"
+
+[[buildpacks]]
+  id = "google.utils.archive-source"
+  uri = "archive_source.tgz"
+
+# PHP applications (gcf)
+[[order]]
+  [[order.group]]
+    id = "google.php.runtime"
+
+  [[order.group]]
+    id = "google.utils.archive-source"
+
+  [[order.group]]
+    id = "google.php.composer-install"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.composer-gcp-build"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.composer"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.functions-framework"
+
+  [[order.group]]
+    id = "google.php.cloudfunctions"
+
+  [[order.group]]
+    id = "google.utils.label-image"
+
+# PHP applications (gae)
+[[order]]
+  [[order.group]]
+    id = "google.php.runtime"
+
+  [[order.group]]
+    id = "google.php.composer-install"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.composer-gcp-build"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.composer"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.appengine"
+
+  [[order.group]]
+    id = "google.utils.label-image"
+
+# PHP applications (gcp and cloud-run)
 [[order]]
   [[order.group]]
     id = "google.php.runtime"
@@ -40,15 +117,19 @@ description = "Unified builder for the PHP runtime"
     optional = true
 
   [[order.group]]
-    id = "google.config.entrypoint"
+    id = "google.utils.label-image"
 
   [[order.group]]
-    id = "google.utils.label"
+    id = "google.config.entrypoint"
+    optional = true
+
+  [[order.group]]
+    id = "google.php.webconfig"
 
 [stack]
-  id = "google"
-  build-image = "gcr.io/buildpacks/gcp/php/build:v1"
-  run-image = "gcr.io/buildpacks/gcp/php/run:v1"
+  id = "google.gae.18"
+  build-image = "gcr.io/gae-runtimes/buildpacks/stacks/google-gae-18/build"
+  run-image = "gcr.io/gae-runtimes/buildpacks/stacks/google-gae-18/run"
 
 [lifecycle]
-  version = "0.13.3"
+  version = "0.16.0"

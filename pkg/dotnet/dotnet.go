@@ -20,36 +20,37 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/buildpacks/pkg/dotnet/release/client"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 )
 
-var (
-	// See getSDKChannelForTargetFramework for how this map is used.
-	frameworkVersionToSDKVersion = map[string]string{
-		"netcoreapp1.0": "1.0",
-		"netcoreapp2.0": "2.2",
-		"netcoreapp2.1": "2.2",
-		"netcoreapp2.2": "2.2",
-		"netcoreapp3.0": "3.1",
-		"netcoreapp3.1": "3.1",
-	}
+const (
+	aspDotnetCore = "Microsoft.AspNetCore.App"
+	envSdkVersion = "GOOGLE_DOTNET_SDK_VERSION"
+	googleMin22   = "google.min.22"
+	// EnvRuntimeVersion is the environment variable key for storing the target dotnet runtime version.
+	EnvRuntimeVersion = "GOOGLE_ASP_NET_CORE_VERSION"
+	// PublishLayerName is the name of the directory containing the publish layer
+	PublishLayerName = "publish"
+	// PublishOutputDirName is passed as the output directory for `dotnet publish`.
+	PublishOutputDirName = "bin"
 )
 
 // ProjectFiles finds all project files supported by dotnet.
-func ProjectFiles(ctx *gcp.Context, dir string) []string {
-	result := ctx.Exec([]string{"find", dir, "-regex", `.*\.\(cs\|fs\|vb\)proj`}, gcp.WithUserTimingAttribution).Stdout
-	result = strings.TrimSpace(result)
-	if result == "" {
-		return nil
+func ProjectFiles(ctx *gcp.Context, dir string) ([]string, error) {
+	result, err := ctx.Exec([]string{"find", dir, "-regex", `.*\.\(cs\|fs\|vb\)proj`}, gcp.WithUserTimingAttribution)
+	if err != nil {
+		return nil, err
 	}
-	return strings.Split(result, "\n")
+	stdout := strings.TrimSpace(result.Stdout)
+	if stdout == "" {
+		return nil, nil
+	}
+	return strings.Split(stdout, "\n"), nil
 }
 
 // Project represents a .NET project file.
@@ -95,23 +96,25 @@ func readProjectFile(data []byte, proj string) (Project, error) {
 	return p, nil
 }
 
-// RuntimeConfigJSONFiles returns all runtimeconfig.json files in 'path' (recursive).
+// BuildableDir returns the directory of the provided GOOGLE_BUILDABLE env var.
+// Buildable is in the form of app, app/app.csproj, or app/app.vbproj.
+func BuildableDir() string {
+	buildable := os.Getenv(env.Buildable)
+	if strings.Contains(filepath.Ext(buildable), "proj") {
+		return filepath.Dir(buildable)
+	}
+	return buildable
+}
+
+// RuntimeConfigJSONFiles returns all runtimeconfig.json files in 'path'.
 // The runtimeconfig.json file is present for compiled .NET assemblies.
 func RuntimeConfigJSONFiles(path string) ([]string, error) {
-	var files []string
-	if err := filepath.WalkDir(path, func(f string, d fs.DirEntry, e error) error {
-		if e != nil {
-			return e
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(f, "runtimeconfig.json") {
-			files = append(files, f)
-		}
-		return nil
-	}); err != nil {
+	files, err := filepath.Glob(filepath.Join(path, "*runtimeconfig.json"))
+	if err != nil {
 		return nil, err
+	}
+	if files == nil {
+		return []string{}, nil
 	}
 	return files, nil
 }
@@ -133,6 +136,7 @@ type configProperties struct {
 type runtimeOptions struct {
 	TFM              string           `json:"tfm"`
 	Framework        framework        `json:"framework"`
+	Frameworks       []framework      `json:"frameworks"`
 	ConfigProperties configProperties `json:"configProperties"`
 }
 
@@ -157,118 +161,32 @@ type globalJSON struct {
 	} `json:"sdk"`
 }
 
-// getSDKChannelForTargetFramework returns the appropriate SDK channel for the given target framework.
-// The purpose of this function is to select an older SDK channel for projects which have a
-// TargetFramework which is not supported by latest. The second, "ok", value is false when there is
-// no appropriate match, signifying that the caller should use the latest framework version.
-//
-// Note that the .NET 5.0 SDK can compile projects that target 1.0 -> 5.0, however, the 5.0 runtime
-// cannot run the app. For .NET, a runtime can run any app within the same major version. We only
-// install the SDK into the build layer and then only install the runtime into the launch layer.
-// Since we install the runtime version associated with an SDK then we should pick an SDK which
-// will have an associated runtime version that is compatible with the target framework. We choose
-// the greatest compatible SDK/runtime combo to take advantage of an security fixes that have been
-// made. For example, if the app is targetting netcoreapp3.0 then we return "3.1" as the 3.1
-// runtime can run the app.
-func getSDKChannelForTargetFramework(tfm string) (string, bool) {
-	value, ok := frameworkVersionToSDKVersion[tfm]
-	if ok {
-		return value, ok
-	}
-	// The 'current' format for recent release of the .NET SDK is 'net5.0', 'net6.0', etc.
-	netPrefix := "net"
-	if strings.HasPrefix(tfm, netPrefix) {
-		return strings.TrimPrefix(tfm, netPrefix), true
-	}
-	return "", false
-}
-
 // GetSDKVersion returns the appropriate .NET SDK version to use, with the following heuristic:
-// 1. Return value of env variable GOOGLE_RUNTIME_VERSION if present.
-// 2. Return SDK.Version from the .NET global.json file if present.
-// 3. Search for runtimeconfig.json, if present, use the target framework  value in
-//    runtimeOptions.tfm and use the latest compatible SDK version.
-// 3. Get the first target framework version from the Project (csproj) and use the latest
-//    compatible SDK version.
-// 4. Query for the latest LTS version of the SDK via azure web service and return result.
+//  1. Return value of env variable GOOGLE_DOTNET_SDK_VERSION if present.
+//  2. Return value of env variable GOOGLE_RUNTIME_VERSION if present.
+//  3. Return SDK.Version from the .NET global.json file if present.
+//  4. Return an empty string by default, which will cause us to use the latest version available
+//     on dl.google.com (see runtime.InstallTarballIfNotCached for details).
 func GetSDKVersion(ctx *gcp.Context) (string, error) {
-	version, ok, err := lookupSpecifiedSDKVersion(ctx)
-	if err != nil {
-		return "", fmt.Errorf("looking up runtime version: %w", err)
-	}
-	if ok {
+	if version := os.Getenv(envSdkVersion); version != "" {
+		ctx.Logf("Using .NET Core SDK version from %s: %s", envSdkVersion, version)
 		return version, nil
 	}
-	sdkChannel, err := getSDKChannel(ctx)
-	if err != nil {
-		return "", err
-	}
-	sdkVersion, err := client.New().GetLatestSDKVersionForChannel(sdkChannel)
-	if err != nil {
-		return "", gcp.UserErrorf("getting latest version for channel %q: %v", sdkChannel, err)
-	}
-	return sdkVersion, nil
-}
-
-func getSDKChannel(ctx *gcp.Context) (string, error) {
-	rtCfgFiles, err := RuntimeConfigJSONFiles(".")
-	if err != nil {
-		return "", fmt.Errorf("finding runtimeconfig.json: %w", err)
-	}
-	if len(rtCfgFiles) > 1 {
-		return "", fmt.Errorf("more than one runtimeconfig.json file found: %v", rtCfgFiles)
-	}
-	if len(rtCfgFiles) == 1 {
-		rtCfg, err := ReadRuntimeConfigJSON(rtCfgFiles[0])
-		if err != nil {
-			return "", fmt.Errorf("reading runtimeconfig.json: %w", err)
-		}
-		sdkChannel, ok := getSDKChannelForTargetFramework(rtCfg.RuntimeOptions.TFM)
-		if !ok {
-			return "", fmt.Errorf("cannot use runtimeconfig.json tfm value of %q to get .NET sdk version", rtCfg.RuntimeOptions.TFM)
-		}
-		return sdkChannel, nil
-	}
-	projPath, err := FindProjectFile(ctx)
-	if err != nil {
-		return "", fmt.Errorf("finding project: %w", err)
-	}
-	project, err := ReadProjectFile(ctx, projPath)
-	if err != nil {
-		return "", fmt.Errorf("reading project at %q: %w", projPath, err)
-	}
-	return getSDKChannelForProject(project)
-}
-
-func getSDKChannelForProject(p Project) (string, error) {
-	if len(p.PropertyGroups) == 0 {
-		return "", fmt.Errorf("cannot detect SDK version: project's TargetFrameworks field is empty")
-	}
-	version, ok := getSDKChannelForTargetFramework(p.PropertyGroups[0].TargetFramework)
-	if !ok {
-		return "", fmt.Errorf("cannot use project's TargetFramework value of %q to get .NET sdk version", p.PropertyGroups[0].TargetFramework)
-	}
-	return version, nil
-}
-
-// lookupSpecifiedSDKVersion returns the SDK version specified in the env var GOOGLE_RUNTIME_VERSION *or*
-// the .NET global.json file. If no such version is specified, then the second return value is false.
-func lookupSpecifiedSDKVersion(ctx *gcp.Context) (string, bool, error) {
-	version := os.Getenv(env.RuntimeVersion)
-	if version != "" {
-		ctx.Logf("Using .NET Core SDK version from env: %s", version)
-		return version, true, nil
+	if version := os.Getenv(env.RuntimeVersion); version != "" {
+		ctx.Logf("Using .NET Core SDK version from %s: %s", env.RuntimeVersion, version)
+		return version, nil
 	}
 	ctx.Logf("Looking for global.json in %v", ctx.ApplicationRoot())
 	gjs, err := getGlobalJSONOrNil(ctx.ApplicationRoot())
-	if err != nil || gjs == nil {
-		return "", false, err
+	if err != nil {
+		return "", err
 	}
-	if gjs.Sdk.Version == "" {
-		return "", false, nil
+	if gjs != nil && gjs.Sdk.Version != "" {
+		ctx.Logf("Using .NET Core SDK version from global.json: %s", gjs.Sdk.Version)
+		return gjs.Sdk.Version, nil
 	}
-	ctx.Logf("Using .NET Core SDK version from global.json: %s", version)
-	return gjs.Sdk.Version, true, nil
+	ctx.Logf("Using latest stable .NET Core SDK version")
+	return "", nil
 }
 
 func getGlobalJSONOrNil(applicationRoot string) (*globalJSON, error) {
@@ -298,11 +216,77 @@ func FindProjectFile(ctx *gcp.Context) (string, error) {
 	} else if err != nil {
 		return "", fmt.Errorf("stating %s: %v", proj, err)
 	} else if fi.IsDir() {
-		projFiles := ProjectFiles(ctx, proj)
+		projFiles, err := ProjectFiles(ctx, proj)
+		if err != nil {
+			return "", err
+		}
 		if len(projFiles) != 1 {
 			return "", gcp.UserErrorf("expected to find exactly one project file in directory %s, found %v", proj, projFiles)
 		}
 		proj = projFiles[0]
 	}
 	return proj, nil
+}
+
+// GetRuntimeVersion returns the value in GOOGLE_ASP_NET_CORE_VERSION, and if not set, returns
+// Microsoft.AspNetCore.App version in the runtimeconfig.json file found in dir.
+func GetRuntimeVersion(ctx *gcp.Context, dir string) (string, error) {
+	envVarVersion := os.Getenv(EnvRuntimeVersion)
+	if envVarVersion != "" {
+		ctx.Logf("Determined runtime version from %v: %v", EnvRuntimeVersion, envVarVersion)
+		return envVarVersion, nil
+	}
+
+	rtCfgVersion, rtCfgFile, rtCfgErr := getRuntimeVersionFromRtCfgDir(ctx, dir)
+	if rtCfgErr != nil {
+		return "", fmt.Errorf("%v was not set; when %v absent, getting version from runtimeconfig.json failed: %w", EnvRuntimeVersion, EnvRuntimeVersion, rtCfgErr)
+	}
+	ctx.Logf("Determined runtime version from %v: %v", rtCfgFile, rtCfgVersion)
+	return rtCfgVersion, nil
+}
+
+func getRuntimeVersionFromRtCfgDir(ctx *gcp.Context, dir string) (string, string, error) {
+	rtCfgFiles, err := RuntimeConfigJSONFiles(dir)
+	if err != nil {
+		return "", "", gcp.InternalErrorf("finding runtimeconfig.json: %v", err)
+	}
+
+	if len(rtCfgFiles) > 1 {
+		return "", "", fmt.Errorf("more than one runtimeconfig.json file found: %v", rtCfgFiles)
+	}
+
+	if len(rtCfgFiles) < 1 {
+		return "", "", fmt.Errorf("no runtimeconfig.json file was found")
+	}
+	ctx.Logf("Found runtimeconfig file %q", rtCfgFiles[0])
+
+	version := ""
+	rtCfg, err := ReadRuntimeConfigJSON(rtCfgFiles[0])
+	if err != nil {
+		return "", rtCfgFiles[0], fmt.Errorf("reading runtimeconfig.json: %w", err)
+	}
+
+	if rtCfg.RuntimeOptions.Framework.Name == aspDotnetCore {
+		version = rtCfg.RuntimeOptions.Framework.Version
+	} else {
+		for _, fw := range rtCfg.RuntimeOptions.Frameworks {
+			if fw.Name == aspDotnetCore {
+				version = fw.Version
+				break
+			}
+		}
+	}
+
+	if version == "" {
+		return "", rtCfgFiles[0], fmt.Errorf("couldn't find runtime version for framework %s from "+
+			"runtimeconfig.json: %#v", aspDotnetCore, rtCfg)
+	}
+
+	return version, rtCfgFiles[0], nil
+}
+
+// RequiresGlobalizationInvariant returns true if the system lacks the OS packages necessary to
+// support .NET globalization.
+func RequiresGlobalizationInvariant(ctx *gcp.Context) bool {
+	return ctx.StackID() == googleMin22
 }

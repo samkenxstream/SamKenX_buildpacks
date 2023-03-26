@@ -17,6 +17,7 @@ package nodejs
 import (
 	"strings"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/Masterminds/semver"
 )
@@ -28,8 +29,25 @@ const (
 	NPMShrinkwrap = "npm-shrinkwrap.json"
 )
 
-// minPruneVersion is the first npm version that supports the prune command.
-var minPruneVersion = semver.MustParse("5.7.0")
+var (
+	// minPruneVersion is the first npm version that supports the prune command.
+	minPruneVersion = semver.MustParse("5.7.0")
+	// minNpmCIVersion is the first npm version that suports the ci command.
+	minNpmCIVersion = semver.MustParse("6.14.0")
+)
+
+// RequestedNPMVersion returns any customer provided NPM version constraint configured in the
+// "engines" section of the package.json file in the given application dir.
+func RequestedNPMVersion(pjs *PackageJSON) (string, error) {
+	if pjs == nil || pjs.Engines.NPM == "" {
+		return "", nil
+	}
+	version, err := resolvePackageVersion("npm", pjs.Engines.NPM)
+	if err != nil {
+		gcp.InternalErrorf("fetching npm metadata: %v", err)
+	}
+	return version, nil
+}
 
 // EnsureLockfile returns the name of the lockfile, generating a package-lock.json if necessary.
 func EnsureLockfile(ctx *gcp.Context) (string, error) {
@@ -48,33 +66,59 @@ func EnsureLockfile(ctx *gcp.Context) (string, error) {
 	if !pkgLockExists {
 		ctx.Logf("Generating %s.", PackageLock)
 		ctx.Warnf("*** Improve build performance by generating and committing %s.", PackageLock)
-		ctx.Exec([]string{"npm", "install", "--package-lock-only", "--quiet"}, gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"npm", "install", "--package-lock-only", "--quiet"}, gcp.WithUserAttribution); err != nil {
+			return "", err
+		}
 	}
 	return PackageLock, nil
 }
 
-// NPMInstallCommand returns the correct install command based on the version of Node.js.
+// NPMInstallCommand returns the correct install command based on the version of Node.js. By default
+// we prefer "npm ci" because it handles transitive dependencies determinstically. See the NPM docs:
+// https://docs.npmjs.com/cli/v6/commands/npm-ci
 func NPMInstallCommand(ctx *gcp.Context) (string, error) {
-	// HACK: For backwards compatibility on App Engine Node.js 10 and older, always use `npm install`.
-	isOldNode, err := isPreNode11(ctx)
+	// b/236758688: For backwards compatibility on GAE & GCF Node.js 10 and older, always use `npm install`.
+	if env.IsGAE() || env.IsGCF() {
+		isOldNode, err := isPreNode11(ctx)
+		if err != nil {
+			return "", err
+		}
+		if isOldNode {
+			return "install", nil
+		}
+	}
+	npmVer, err := npmVersion(ctx)
 	if err != nil {
 		return "", err
 	}
-	if isOldNode {
+	version, err := semver.NewVersion(npmVer)
+	if err != nil {
+		return "", gcp.InternalErrorf("parsing npm version: %v", err)
+	}
+	// HACK: For backwards compatibility with old versions of npm always use `npm install`.
+	if version.LessThan(minNpmCIVersion) {
 		return "install", nil
 	}
 	return "ci", nil
 }
 
 // npmVersion returns the version of NPM installed in the system.
-var npmVersion = func(ctx *gcp.Context) string {
-	return strings.TrimSpace(ctx.Exec([]string{"npm", "--version"}).Stdout)
+var npmVersion = func(ctx *gcp.Context) (string, error) {
+	result, err := ctx.Exec([]string{"npm", "--version"})
+	if err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(result.Stdout), nil
 }
 
 // SupportsNPMPrune returns true if the version of npm installed in the system supports the prune
 // command.
 func SupportsNPMPrune(ctx *gcp.Context) (bool, error) {
-	version, err := semver.NewVersion(npmVersion(ctx))
+	npmVer, err := npmVersion(ctx)
+	if err != nil {
+		return false, err
+	}
+	version, err := semver.NewVersion(npmVer)
 	if err != nil {
 		return false, gcp.InternalErrorf("parsing npm version: %v", err)
 	}

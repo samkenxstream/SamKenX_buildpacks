@@ -10,8 +10,12 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "nodejs",
+    version = "2.1.0",
     visibility = [
         "//builders:nodejs_builders",
+        # Ruby on Rails apps require Nodejs and Yarn for precompiling assets
+        "//builders:ruby_builders",
     ],
 )
 
@@ -24,11 +28,11 @@ go_binary(
         "-w",
     ],
     deps = [
+        "//pkg/ar",
         "//pkg/cache",
         "//pkg/devmode",
         "//pkg/gcpbuildpack",
         "//pkg/nodejs",
-        "@com_github_buildpacks_libcnb//:go_default_library",
     ],
 )
 

@@ -13,13 +13,16 @@
 // limitations under the License.
 
 // Implements utils/nginx buildpack.
-// The nginx buildpack installs the nginx web server.
+// The nginx buildpack installs the nginx web server, pid1 and serve binaries.
 package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
+	"github.com/buildpacks/libcnb"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
 )
@@ -28,6 +31,9 @@ const (
 	// nginxVerConstraint is used to control updating to a new major version with any potential breaking change.
 	// Update this to allow a new major version.
 	nginxVerConstraint = "^1.21.6"
+
+	// pid1VerConstraint is used to control updating to a new major version.
+	pid1VerConstraint = "^1.0.0"
 )
 
 func main() {
@@ -40,10 +46,32 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 }
 
 func buildFn(ctx *gcp.Context) error {
-	l, err := ctx.Layer("nginx", gcp.CacheLayer, gcp.LaunchLayer)
+	// install nginx
+	nl, err := install(ctx, "nginx", nginxVerConstraint, runtime.Nginx)
 	if err != nil {
-		return fmt.Errorf("creating layer: %w", err)
+		return err
 	}
-	_, err = runtime.InstallTarballIfNotCached(ctx, runtime.Nginx, nginxVerConstraint, l)
-	return err
+	nl.LaunchEnvironment.Append("PATH", string(os.PathListSeparator), filepath.Join(nl.Path, "sbin"))
+	nl.BuildEnvironment.Default("NGINX_ROOT", nl.Path)
+
+	// install pid1
+	pl, err := install(ctx, "pid1", pid1VerConstraint, runtime.Pid1)
+	if err != nil {
+		return err
+	}
+	pl.LaunchEnvironment.Append("PATH", string(os.PathListSeparator), pl.Path)
+
+	return nil
+}
+
+func install(ctx *gcp.Context, name, verConstraint string, ir runtime.InstallableRuntime) (*libcnb.Layer, error) {
+	l, err := ctx.Layer(name, gcp.CacheLayer, gcp.LaunchLayer)
+	if err != nil {
+		return nil, fmt.Errorf("creating layer: %w", err)
+	}
+	if _, err = runtime.InstallTarballIfNotCached(ctx, ir, verConstraint, l); err != nil {
+		return nil, err
+	}
+
+	return l, nil
 }

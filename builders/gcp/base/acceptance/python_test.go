@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,123 +24,90 @@ func init() {
 }
 
 func TestAcceptancePython(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.Test{
 		{
-			Name:    "entrypoint from procfile web",
-			App:     "python/simple",
-			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
+			Name:            "entrypoint from procfile web",
+			App:             "simple",
+			MustUse:         []string{pythonRuntime, pythonPIP, entrypoint},
+			EnableCacheTest: true,
 		},
 		{
 			Name:       "entrypoint from procfile custom",
-			App:        "python/simple",
+			App:        "simple",
 			Path:       "/custom",
 			Entrypoint: "custom", // Must match the non-web process in Procfile.
 			MustUse:    []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
 			Name:    "entrypoint from env",
-			App:     "python/simple",
+			App:     "simple",
 			Path:    "/custom",
 			Env:     []string{"GOOGLE_ENTRYPOINT=gunicorn -b :8080 custom:app"},
 			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
 			Name:    "entrypoint with env var",
-			App:     "python/simple",
+			App:     "simple",
 			Path:    "/env?want=bar",
 			Env:     []string{"GOOGLE_ENTRYPOINT=FOO=bar gunicorn -b :8080 main:app"},
 			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
 			Name:    "runtime version from env",
-			App:     "python/version",
-			Path:    "/version?want=3.8.0",
-			Env:     []string{"GOOGLE_RUNTIME_VERSION=3.8.0"},
+			App:     "version",
+			Path:    "/version?want=3.10.8",
+			Env:     []string{"GOOGLE_RUNTIME_VERSION=3.10.8"},
 			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
-			Name:    "runtime version from .python-version",
-			App:     "python/version",
-			Path:    "/version?want=3.8.1",
+			Name:    "runtime version from GOOGLE_PYTHON_VERSION env",
+			App:     "version",
+			Path:    "/version?want=3.10.2",
+			Env:     []string{"GOOGLE_RUNTIME_VERSION=3.10.2"},
 			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
-			Name:       "selected via GOOGLE_RUNTIME",
-			App:        "override",
-			Env:        []string{"GOOGLE_RUNTIME=python", "GOOGLE_ENTRYPOINT=gunicorn -b :8080 main:app"},
-			MustUse:    []string{pythonRuntime},
-			MustNotUse: []string{goRuntime, javaRuntime, nodeRuntime},
+			Name:                       "runtime version from .python-version",
+			VersionInclusionConstraint: "3.10.7", // version is set in the .python-version file
+			App:                        "python_version_file",
+			Path:                       "/version?want=3.10.7",
+			MustUse:                    []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 		{
 			Name:    "python with client-side scripts correctly builds as a python app",
-			App:     "python/scripts",
+			App:     "scripts",
 			Env:     []string{"GOOGLE_ENTRYPOINT=gunicorn -b :8080 main:app"},
 			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
 		},
 	}
-	// Tests for two most recent published patch versions of Python.
-	// Unlike with the other languages, we control the versions published to GCS.
-	for _, v := range []string{
-		"3.7.11",
-		"3.7.12",
-		"3.8.11",
-		"3.8.12",
-		"3.9.6",
-		"3.9.7",
-		"3.9.8",
-	} {
-		testCases = append(testCases, acceptance.Test{
-			Name:    "runtime version " + v,
-			App:     "python/version",
-			Path:    "/version?want=" + v,
-			Env:     []string{"GOOGLE_RUNTIME_VERSION=" + v},
-			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
-		})
-	}
 
-	// Tests for specific versions of Python available on dl.google.com.
-	for _, v := range acceptance.RuntimeVersions("python", "3.7.12", "3.8.12", "3.9.10", "3.10.2") {
-		testCases = append(testCases, acceptance.Test{
-			Name:    "dl.google.com runtime version " + v,
-			App:     "python/version",
-			Path:    "/version?want=" + v,
-			Env:     []string{"GOOGLE_PYTHON_VERSION=" + v},
-			MustUse: []string{pythonRuntime, pythonPIP, entrypoint},
-		})
-	}
-
-	for _, tc := range testCases {
+	for _, tc := range acceptance.FilterTests(t, imageCtx, testCases) {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestApp(t, builder, tc)
+			acceptance.TestApp(t, imageCtx, tc)
 		})
 	}
 }
 
 func TestFailuresPython(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.FailureTest{
 		{
 			Name:      "bad runtime version",
-			App:       "python/simple",
+			App:       "simple",
 			Env:       []string{"GOOGLE_RUNTIME_VERSION=BAD_NEWS_BEARS", "GOOGLE_ENTRYPOINT=gunicorn -b :8080 main:app"},
-			MustMatch: "Runtime version BAD_NEWS_BEARS does not exist",
-		},
-		{
-			Name:      "python-version empty",
-			App:       "python/empty_version",
-			MustMatch: ".python-version exists but does not specify a version",
+			MustMatch: "invalid Python version specified",
 		},
 		{
 			Name:      "missing entrypoint",
-			App:       "python/missing_entrypoint",
+			App:       "missing_entrypoint",
 			MustMatch: `for Python, an entrypoint must be manually set, either with "GOOGLE_ENTRYPOINT" env var or by creating a "Procfile" file`,
 		},
 	}
@@ -150,7 +117,7 @@ func TestFailuresPython(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestBuildFailure(t, builder, tc)
+			acceptance.TestBuildFailure(t, imageCtx, tc)
 		})
 	}
 }

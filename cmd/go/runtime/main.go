@@ -35,6 +35,7 @@ const (
 	goURL        = "https://dl.google.com/go/go%s.linux-amd64.tar.gz"
 	goLayer      = "go"
 	versionKey   = "version"
+	envGoVersion = "GOOGLE_GO_VERSION"
 )
 
 func main() {
@@ -42,11 +43,10 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	if result := runtime.CheckOverride(ctx, "go"); result != nil {
+	if result := runtime.CheckOverride("go"); result != nil {
 		return result, nil
 	}
-
-	atLeastOne, err := ctx.HasAtLeastOne("*.go")
+	atLeastOne, err := ctx.HasAtLeastOneOutsideDependencyDirectories("*.go")
 	if err != nil {
 		return nil, fmt.Errorf("finding *.go files: %w", err)
 	}
@@ -88,7 +88,9 @@ func buildFn(ctx *gcp.Context) error {
 		// Download and install Go in layer.
 		ctx.Logf("Installing Go v%s", version)
 		command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s --strip-components=1", archiveURL, grl.Path)
-		ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution)
+		if _, err := ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution); err != nil {
+			return err
+		}
 		ctx.SetMetadata(grl, versionKey, version)
 	}
 
@@ -103,6 +105,11 @@ func buildFn(ctx *gcp.Context) error {
 }
 
 func runtimeVersion(ctx *gcp.Context) (string, error) {
+	if version := os.Getenv(envGoVersion); version != "" {
+		ctx.Logf("Using runtime version from %s: %s", envGoVersion, version)
+		return version, nil
+	}
+
 	if version := os.Getenv(env.RuntimeVersion); version != "" {
 		ctx.Logf("Using runtime version from %s: %s", env.RuntimeVersion, version)
 		return version, nil
@@ -122,7 +129,10 @@ type goReleases []struct {
 
 // latestGoVersion returns the latest version of Go
 func latestGoVersion(ctx *gcp.Context) (string, error) {
-	result := ctx.Exec([]string{"curl", "--fail", "--show-error", "--silent", "--location", goVersionURL}, gcp.WithUserAttribution)
+	result, err := ctx.Exec([]string{"curl", "--fail", "--show-error", "--silent", "--location", goVersionURL}, gcp.WithUserAttribution)
+	if err != nil {
+		return "", err
+	}
 	return parseVersionJSON(result.Stdout)
 }
 

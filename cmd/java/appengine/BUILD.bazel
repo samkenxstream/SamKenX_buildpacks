@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "java",
+    version = "0.9.0",
     visibility = [
         "//builders:java_builders",
     ],
@@ -26,6 +28,7 @@ go_binary(
     deps = [
         "//pkg/appengine",
         "//pkg/appstart",
+        "//pkg/env",
         "//pkg/gcpbuildpack",
         "//pkg/java",
     ],

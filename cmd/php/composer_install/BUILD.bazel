@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "php",
+    version = "0.0.1",
     visibility = [
         "//builders:php_builders",
     ],
@@ -24,8 +26,9 @@ go_binary(
         "-w",
     ],
     deps = [
+        "//pkg/env",
+        "//pkg/fetch",
         "//pkg/gcpbuildpack",
-        "//pkg/runtime",
         "@com_github_buildpacks_libcnb//:go_default_library",
     ],
 )
@@ -38,6 +41,7 @@ go_test(
     rundir = ".",
     deps = [
         "//internal/buildpacktest",
+        "//internal/mockprocess",
         "//internal/testserver",
     ],
 )

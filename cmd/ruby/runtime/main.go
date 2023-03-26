@@ -18,19 +18,32 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/nodejs"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/ruby"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
 )
+
+var osNodeVersionMap = map[string]string{
+	"ubuntu1804": "12.22.12",
+	"ubuntu2204": "*",
+}
+
+// Rails apps using the "webpack" gem require Node.js for asset precompilation.
+func getRailsNodeVersion(ctx *gcp.Context) string {
+	return osNodeVersionMap[runtime.OSForStack(ctx.StackID())]
+}
 
 func main() {
 	gcp.Main(detectFn, buildFn)
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	if result := runtime.CheckOverride(ctx, "ruby"); result != nil {
+	if result := runtime.CheckOverride("ruby"); result != nil {
 		return result, nil
 	}
 
@@ -48,7 +61,7 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 	if gemsRbExists {
 		return gcp.OptInFileFound("gems.rb"), nil
 	}
-	atLeastOne, err := ctx.HasAtLeastOne("*.rb")
+	atLeastOne, err := ctx.HasAtLeastOneOutsideDependencyDirectories("*.rb")
 	if err != nil {
 		return nil, fmt.Errorf("finding *.rb files: %w", err)
 	}
@@ -64,13 +77,36 @@ func buildFn(ctx *gcp.Context) error {
 	if err != nil {
 		return fmt.Errorf("determining runtime version: %w", err)
 	}
-	rl, err := ctx.Layer("ruby", gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayer)
+	rl, err := ctx.Layer("ruby", gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayerUnlessSkipRuntimeLaunch)
 	if err != nil {
 		return fmt.Errorf("creating layer: %w", err)
 	}
+
+	// Rails asset precompilation needs Node.js installed. Set the version if customer has not set it.
+	if os.Getenv(nodejs.EnvNodeVersion) == "" {
+		railsNodeVersion := getRailsNodeVersion(ctx)
+		ctx.Logf("Setting Nodejs runtime version %s: %s", nodejs.EnvNodeVersion, railsNodeVersion)
+		rl.BuildEnvironment.Override(nodejs.EnvNodeVersion, railsNodeVersion)
+	}
+
 	_, err = runtime.InstallTarballIfNotCached(ctx, runtime.Ruby, version, rl)
 	if err != nil {
 		return err
+	}
+
+	versionInstalled, _ := runtime.ResolveVersion(runtime.Ruby, version, runtime.OSForStack(ctx.StackID()))
+	// Store the installed Ruby version for subsequent buildpacks (like RubyGems) that depend on it.
+	rl.BuildEnvironment.Override(ruby.RubyVersionKey, versionInstalled)
+
+	ctx.Exec([]string{"ldd", filepath.Join(rl.Path, "lib/ruby/3.1.0/x86_64-linux/psych.so")})
+
+	// For GAE and GCF, install RubyGems and Bundler in the same layer to maintain compatibility
+	// with existing builder images.
+	if env.IsGAE() || env.IsGCF() {
+		err = runtime.PinGemAndBundlerVersion(ctx, version, rl)
+		if err != nil {
+			return fmt.Errorf("updating rubygems and bundler: %w", err)
+		}
 	}
 
 	// Ruby sometimes writes to local directories tmp/ and log/, so we link these to writable areas.

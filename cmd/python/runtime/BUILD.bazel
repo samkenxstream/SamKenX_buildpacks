@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "python",
+    version = "0.9.1",
     visibility = [
         "//builders:python_builders",
     ],
@@ -26,8 +28,8 @@ go_binary(
     deps = [
         "//pkg/env",
         "//pkg/gcpbuildpack",
+        "//pkg/python",
         "//pkg/runtime",
-        "@com_github_buildpacks_libcnb//:go_default_library",
     ],
 )
 

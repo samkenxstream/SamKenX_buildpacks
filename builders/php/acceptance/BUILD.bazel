@@ -1,34 +1,80 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("//internal/acceptance:defs.bzl", "acceptance_test_argo_source", "acceptance_test_suite")
+load(":args.bzl", "phpargs")
 
 licenses(["notice"])
 
-exports_files(["config.yaml"])
+exports_files([
+    "config.yaml",
+    "args.bzl",
+])
 
-go_library(
-    name = "acceptance",
-    srcs = ["acceptance.go"],
-    importpath = "github.com/GoogleCloudPlatform/buildpacks/" + package_name(),
+VERSIONS_ALL_PRODUCTS = [
+    "7.2",
+    "7.3",
+    "7.4",
+    "8.1",
+    "8.2",
+]
+
+VERSIONS_GCF_SUPPORT = [
+    "7.4",
+    "8.1",
+    "8.2",
+]
+
+acceptance_test_suite(
+    name = "gcp_test",
+    srcs = [
+        "common_test.go",
+        "gcp_test.go",
+    ],
+    builder = "//builders/php:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/php:generic",
+    versions = VERSIONS_ALL_PRODUCTS,
 )
 
-go_test(
-    name = "acceptance_test",
-    size = "enormous",
-    srcs = ["acceptance_test.go"],
-    args = [
-        "-test-data=$(location //builders/testdata:generic)",
-        "-structure-test-config=$(location :config.yaml)",
-        "-builder-source=$(location //builders/php:builder.tar)",
-        "-builder-prefix=php-acceptance-test-",
+# Test the run image tagged as latest in gae-runtimes.
+acceptance_test_suite(
+    name = "gae_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
     ],
-    data = [
-        ":config.yaml",
-        "//builders/php:builder.tar",
-        "//builders/testdata:generic",
-    ],
-    embed = [":acceptance"],
+    argsmap = phpargs(),
+    builder = "//builders/php:builder.tar",
     rundir = ".",
-    tags = [
-        "local",
+    testdata = "//builders/testdata/php:appengine",
+    versions = VERSIONS_ALL_PRODUCTS,
+)
+
+# Test the run image tagged as ${_CANDIDATE_NAME} in gae-runtimes-private.
+acceptance_test_suite(
+    name = "gae_candidate_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
     ],
-    deps = ["//internal/acceptance"],
+    argsmap = phpargs("$${_CANDIDATE_NAME}"),
+    builder = "//builders/php:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/php:appengine",
+    versions = VERSIONS_ALL_PRODUCTS,
+)
+
+acceptance_test_suite(
+    name = "gcf_test",
+    srcs = [
+        "common_test.go",
+        "gcf_test.go",
+    ],
+    builder = "//builders/php:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/php:functions",
+    versions = VERSIONS_GCF_SUPPORT,
+)
+
+acceptance_test_argo_source(
+    name = "argo_source",
+    testdata = "//builders/testdata:php",
 )

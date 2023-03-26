@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	bpt "github.com/GoogleCloudPlatform/buildpacks/internal/buildpacktest"
+	"github.com/GoogleCloudPlatform/buildpacks/internal/mockprocess"
 )
 
 func TestDetect(t *testing.T) {
@@ -53,6 +54,7 @@ func TestBuild(t *testing.T) {
 		envs         []string
 		fnPkgName    string
 		opts         []bpt.Option
+		mocks        []*mockprocess.Mock
 		wantExitCode int // 0 if unspecified
 		wantCommands []string
 	}{
@@ -61,8 +63,8 @@ func TestBuild(t *testing.T) {
 			app:       "with_framework",
 			envs:      []string{"GOOGLE_FUNCTION_TARGET=Func"},
 			fnPkgName: "myfunc",
-			opts: []bpt.Option{
-				bpt.WithExecMock(`^go list -m$`, bpt.MockStdout("example.com/myfunc")),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New(`^go list -m$`, mockprocess.WithStdout("example.com/myfunc")),
 			},
 			wantCommands: []string{fmt.Sprintf("go mod tidy")},
 		},
@@ -71,46 +73,117 @@ func TestBuild(t *testing.T) {
 			app:       "no_framework",
 			envs:      []string{"GOOGLE_FUNCTION_TARGET=Func"},
 			fnPkgName: "myfunc",
-			opts: []bpt.Option{
-				bpt.WithExecMock(`^go list -m$`, bpt.MockStdout("example.com/myfunc")),
+			mocks: []*mockprocess.Mock{
+				mockprocess.New(`^go list -m$`, mockprocess.WithStdout("example.com/myfunc")),
 			},
 			wantCommands: []string{
-				fmt.Sprintf("go get %s", functionsFrameworkModule),
+				fmt.Sprintf("go mod edit -require %s", functionsFrameworkModule),
 				"go mod tidy",
 			},
 		},
 		{
 			name:         "vendored function",
-			app:          "no_framework_vendored",
+			app:          "no_framework_vendored_no_go_mod",
 			envs:         []string{"GOOGLE_FUNCTION_TARGET=Func"},
 			fnPkgName:    "myfunc",
 			wantCommands: []string{"go mod vendor"},
+		},
+		{
+			name:      "with framework vendored",
+			app:       "with_framework_vendored",
+			envs:      []string{"GOOGLE_FUNCTION_TARGET=Func"},
+			fnPkgName: "myfunc",
+			mocks: []*mockprocess.Mock{
+				mockprocess.New(`^go list -m$`, mockprocess.WithStdout("example.com/myfunc")),
+				mockprocess.New(`^go list -m -f {{.Version}}.*`, mockprocess.WithStdout("v1.0.0")),
+			},
+		},
+		{
+			name:         "without framework vendored",
+			app:          "without_framework_vendored",
+			envs:         []string{"GOOGLE_FUNCTION_TARGET=Func"},
+			fnPkgName:    "myfunc",
+			mocks:        []*mockprocess.Mock{},
+			wantExitCode: 1,
+		},
+		{
+			name:      "go mod with version",
+			app:       "with_versioned_mod",
+			envs:      []string{"GOOGLE_FUNCTION_TARGET=Func"},
+			fnPkgName: "myfunc",
+			mocks: []*mockprocess.Mock{
+				mockprocess.New(`^go list -m$`, mockprocess.WithStdout("example.com/myfunc/v3")),
+			},
+			wantCommands: []string{
+				"go mod edit -require example.com/myfunc/v3@v3",
+				"go mod edit -replace example.com/myfunc/v3=",
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			mocks := []*mockprocess.Mock{
+				mockprocess.New("get_package", mockprocess.WithStdout(fmt.Sprintf(`{"name":"%s"}`, tc.fnPkgName))),
+			}
+			mocks = append(mocks, tc.mocks...)
+
 			opts := []bpt.Option{
 				bpt.WithTestName(tc.name),
 				bpt.WithApp(tc.app),
 				bpt.WithEnvs(tc.envs...),
-				bpt.WithExecMock("get_package", bpt.MockStdout(fmt.Sprintf(`{"name":"%s"}`, tc.fnPkgName))),
+				bpt.WithExecMocks(mocks...),
 			}
-
 			opts = append(opts, tc.opts...)
 			result, err := bpt.RunBuild(t, buildFn, opts...)
-			if err != nil {
-				t.Fatalf("error running build: %v,logs: %s", err, result.Output)
+			if err != nil && tc.wantExitCode == 0 {
+				t.Fatalf("error running build: %v, logs: %s", err, result.Output)
 			}
 
 			if result.ExitCode != tc.wantExitCode {
 				t.Errorf("build exit code mismatch, got: %d, want: %d", result.ExitCode, tc.wantExitCode)
 			}
+
 			for _, cmd := range tc.wantCommands {
 				if !result.CommandExecuted(cmd) {
 					t.Errorf("expected command %q to be executed, but it was not, build output: %s", cmd, result.Output)
 				}
 			}
 		})
+	}
+}
+
+func TestParseModuleVersion(t *testing.T) {
+	testCases := []struct {
+		module string
+		want   string
+	}{
+		{
+			module: "example.com/v2",
+			want:   "v2",
+		},
+		{
+			module: "/v123",
+			want:   "v123",
+		},
+		{
+			module: "/v",
+			want:   "",
+		},
+		{
+			module: "example.com/no/major/version",
+			want:   "",
+		},
+	}
+
+	for _, tc := range testCases {
+		got, err := parseModuleVersion(tc.module)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got != tc.want {
+			t.Errorf("parsed version mismatch, got: %q, want: %q", got, tc.want)
+		}
 	}
 }

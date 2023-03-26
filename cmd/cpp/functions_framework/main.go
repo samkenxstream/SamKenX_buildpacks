@@ -33,8 +33,8 @@ const (
 	buildLayerName              = "build"
 	vcpkgCacheLayerName         = "vcpkg-binary-cache"
 	vcpkgLayerName              = "vcpkg"
-	vcpkgTarballPrefix          = "https://github.com/microsoft/vcpkg/archive/refs/tags"
-	vcpkgVersion                = "2022.02.23"
+	vcpkgTarballPrefix          = "https://github.com/microsoft/vcpkg/archive"
+	vcpkgVersion                = "49931943abe2a22dd9d91be2c4928ead56349b14"
 	vcpkgVersionPrefix          = "Vcpkg package management program version "
 	vcpkgTripletName            = "x64-linux-nodebug"
 	installLayerName            = "cpp"
@@ -45,20 +45,29 @@ type signatureInfo struct {
 	ReturnType   string
 	ArgumentType string
 	WrapperType  string
+	Eval         string
 }
 
 var (
-	vcpkgURL      = fmt.Sprintf("%s/%s.tar.gz", vcpkgTarballPrefix, vcpkgVersion)
-	mainTmpl      = template.Must(template.New("mainV0").Parse(mainTextTemplateV0))
+	vcpkgURL             = fmt.Sprintf("%s/%s.tar.gz", vcpkgTarballPrefix, vcpkgVersion)
+	mainTmpl             = template.Must(template.New("mainV0").Parse(mainTextTemplateV0))
+	declarativeSignature = signatureInfo{
+		ReturnType:   functionsFrameworkNamespace + "::Function",
+		ArgumentType: "",
+		WrapperType:  "",
+		Eval:         "()",
+	}
 	httpSignature = signatureInfo{
 		ReturnType:   functionsFrameworkNamespace + "::HttpResponse",
 		ArgumentType: functionsFrameworkNamespace + "::HttpRequest",
 		WrapperType:  functionsFrameworkNamespace + "::UserHttpFunction",
+		Eval:         "",
 	}
 	cloudEventSignature = signatureInfo{
 		ReturnType:   "void",
 		ArgumentType: functionsFrameworkNamespace + "::CloudEvent",
 		WrapperType:  functionsFrameworkNamespace + "::UserCloudEventFunction",
+		Eval:         "",
 	}
 )
 
@@ -123,7 +132,9 @@ func buildFn(ctx *gcp.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating %v layer: %w", mainLayerName, err)
 	}
-	ctx.SetFunctionsEnvVars(mainLayer)
+	if err := ctx.SetFunctionsEnvVars(mainLayer); err != nil {
+		return err
+	}
 
 	buildLayer, err := ctx.Layer(buildLayerName, gcp.BuildLayer, gcp.CacheLayer)
 	if err != nil {
@@ -176,17 +187,21 @@ func buildFn(ctx *gcp.Context) error {
 		fmt.Sprintf("-DVCPKG_TARGET_TRIPLET=%s", vcpkgTripletName),
 		fmt.Sprintf("-DCMAKE_TOOLCHAIN_FILE=%s/scripts/buildsystems/vcpkg.cmake", vcpkgPath),
 	}
-	ctx.Exec(args, gcp.WithUserAttribution, gcp.WithEnv(
+	if _, err := ctx.Exec(args, gcp.WithUserAttribution, gcp.WithEnv(
 		fmt.Sprintf("VCPKG_DEFAULT_BINARY_CACHE=%s", vcpkgCache.Path),
-		fmt.Sprintf("VCPKG_DEFAULT_HOST_TRIPLET=%s", vcpkgTripletName)))
-	ctx.Exec([]string{cmakeExePath, "--build", buildLayer.Path, "--target", "install"}, gcp.WithUserAttribution)
+		fmt.Sprintf("VCPKG_DEFAULT_HOST_TRIPLET=%s", vcpkgTripletName))); err != nil {
+		return err
+	}
+	if _, err := ctx.Exec([]string{cmakeExePath, "--build", buildLayer.Path, "--target", "install"}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 
 	ctx.AddWebProcess([]string{filepath.Join(installLayer.Path, "bin", "function")})
 	return nil
 }
 
 func warmupVcpkg(ctx *gcp.Context, vcpkgExePath string) error {
-	exec, err := ctx.ExecWithErr([]string{vcpkgExePath, "install", "--feature-flags=-manifests", "--only-downloads", "functions-framework-cpp"}, gcp.WithUserAttribution)
+	exec, err := ctx.Exec([]string{vcpkgExePath, "install", "--feature-flags=-manifests", "--only-downloads", "functions-framework-cpp"}, gcp.WithUserAttribution)
 	if err != nil {
 		return fmt.Errorf("downloading sources (exit code %d): %v", exec.ExitCode, exec.Combined)
 	}
@@ -194,7 +209,7 @@ func warmupVcpkg(ctx *gcp.Context, vcpkgExePath string) error {
 }
 
 func getToolPath(ctx *gcp.Context, vcpkgExePath string, tool string) (string, error) {
-	exec, err := ctx.ExecWithErr([]string{vcpkgExePath, "fetch", "--feature-flags=-manifests", tool}, gcp.WithUserAttribution)
+	exec, err := ctx.Exec([]string{vcpkgExePath, "fetch", "--feature-flags=-manifests", tool}, gcp.WithUserAttribution)
 	if err != nil {
 		return "", fmt.Errorf("fetching %s tool path (exit code %d): %v", tool, exec.ExitCode, exec.Combined)
 	}
@@ -226,10 +241,16 @@ func installVcpkg(ctx *gcp.Context) (string, error) {
 	ctx.CacheMiss(vcpkgLayerName)
 	ctx.Logf("Installing vcpkg %s", vcpkgVersion)
 	command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s --strip-components=1", vcpkgURL, vcpkg.Path)
-	ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution); err != nil {
+		return "", err
+	}
 
-	ctx.Exec([]string{filepath.Join(vcpkg.Path, "bootstrap-vcpkg.sh")})
-	ctx.Exec([]string{"cp", filepath.Join(ctx.BuildpackRoot(), "converter", "x64-linux-nodebug.cmake"), customTripletPath})
+	if _, err := ctx.Exec([]string{filepath.Join(vcpkg.Path, "bootstrap-vcpkg.sh")}); err != nil {
+		return "", err
+	}
+	if _, err := ctx.Exec([]string{"cp", filepath.Join(ctx.BuildpackRoot(), "converter", "x64-linux-nodebug.cmake"), customTripletPath}); err != nil {
+		return "", err
+	}
 
 	return vcpkg.Path, nil
 }
@@ -281,7 +302,10 @@ func extractFnInfo(fnTarget string, fnSignature string) fnInfo {
 		Target:    fnTarget,
 		Namespace: "",
 		ShortName: fnTarget,
-		Signature: httpSignature,
+		Signature: declarativeSignature,
+	}
+	if fnSignature == "http" {
+		info.Signature = httpSignature
 	}
 	if fnSignature == "cloudevent" {
 		info.Signature = cloudEventSignature
@@ -297,7 +321,9 @@ func extractFnInfo(fnTarget string, fnSignature string) fnInfo {
 }
 
 func createMainCppSupportFiles(ctx *gcp.Context, main string, buildpackRoot string) error {
-	ctx.Exec([]string{"cp", filepath.Join(buildpackRoot, "converter", "CMakeLists.txt"), filepath.Join(main, "CMakeLists.txt")})
+	if _, err := ctx.Exec([]string{"cp", filepath.Join(buildpackRoot, "converter", "CMakeLists.txt"), filepath.Join(main, "CMakeLists.txt")}); err != nil {
+		return err
+	}
 
 	vcpkgJSONDestinationFilename := filepath.Join(main, "vcpkg.json")
 	vcpkgJSONSourceFilename := filepath.Join(ctx.ApplicationRoot(), "vcpkg.json")
@@ -309,7 +335,9 @@ func createMainCppSupportFiles(ctx *gcp.Context, main string, buildpackRoot stri
 	if !vcpkgExists {
 		vcpkgJSONSourceFilename = filepath.Join(buildpackRoot, "converter", "vcpkg.json")
 	}
-	ctx.Exec([]string{"cp", vcpkgJSONSourceFilename, vcpkgJSONDestinationFilename})
+	if _, err := ctx.Exec([]string{"cp", vcpkgJSONSourceFilename, vcpkgJSONDestinationFilename}); err != nil {
+		return err
+	}
 
 	return nil
 }

@@ -25,14 +25,13 @@ func init() {
 }
 
 func TestAcceptanceDart(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.Test{
 		{
 			Name:    "simple Dart webserver",
-			App:     "dart/simple",
-			Env:     []string{"GOOGLE_DART_ENABLED=true"},
+			App:     "simple",
 			MustUse: []string{dartCompile},
 		},
 	}
@@ -41,7 +40,7 @@ func TestAcceptanceDart(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestApp(t, builder, tc)
+			acceptance.TestApp(t, imageCtx, tc)
 		})
 	}
 }

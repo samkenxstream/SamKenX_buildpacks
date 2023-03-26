@@ -19,21 +19,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
-	"github.com/buildpacks/libcnb"
 )
 
 const (
 	javaLayer             = "java"
-	javaVersionURL        = "https://api.adoptopenjdk.net/v3/assets/feature_releases/%s/ga?architecture=x64&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=linux&page=0&page_size=1&project=jdk&sort_order=DESC&vendor=adoptopenjdk"
 	defaultFeatureVersion = "11"
-	versionKey            = "version"
 )
 
 func main() {
@@ -41,7 +37,7 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	if result := runtime.CheckOverride(ctx, "java"); result != nil {
+	if result := runtime.CheckOverride("java"); result != nil {
 		return result, nil
 	}
 
@@ -87,57 +83,12 @@ func buildFn(ctx *gcp.Context) error {
 	} else {
 		ctx.Logf("Using latest Java %s runtime version. You can specify a different version with %s: https://github.com/GoogleCloudPlatform/buildpacks#configuration", defaultFeatureVersion, env.RuntimeVersion)
 	}
-
-	releaseURL := fmt.Sprintf(javaVersionURL, featureVersion)
-	code, err := ctx.HTTPStatus(releaseURL)
-	if err != nil {
-		return err
-	}
-	if code != http.StatusOK {
-		return gcp.UserErrorf("Java feature version %s does not exist at %s (status %d). You can specify the feature version with %s. See available feature runtime versions at https://api.adoptopenjdk.net/v3/info/available_releases", featureVersion, releaseURL, code, env.RuntimeVersion)
-	}
-
-	result := ctx.Exec([]string{"curl", "--fail", "--show-error", "--silent", "--location", releaseURL}, gcp.WithUserAttribution)
-	release, err := parseVersionJSON(result.Stdout)
-	if err != nil {
-		return fmt.Errorf("parsing JSON returned by %s: %w", releaseURL, err)
-	}
-
-	version, archiveURL, err := extractRelease(release)
-	if err != nil {
-		return fmt.Errorf("extracting release returned by %s: %w", releaseURL, err)
-	}
-
-	ctx.AddBOMEntry(libcnb.BOMEntry{
-		Name:     javaLayer,
-		Metadata: map[string]interface{}{"version": version},
-		Build:    true,
-		Launch:   true,
-	})
-
-	// Check the metadata in the cache layer to determine if we need to proceed.
-	l, err := ctx.Layer(javaLayer, gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayer)
+	l, err := ctx.Layer(javaLayer, gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayerUnlessSkipRuntimeLaunch)
 	if err != nil {
 		return fmt.Errorf("creating %v layer: %w", javaLayer, err)
 	}
-	metaVersion := ctx.GetMetadata(l, versionKey)
-	if version == metaVersion {
-		ctx.CacheHit(javaLayer)
-		return nil
-	}
-	ctx.CacheMiss(javaLayer)
-	if err := ctx.ClearLayer(l); err != nil {
-		return fmt.Errorf("clearing layer %q: %w", l.Name, err)
-	}
-
-	// Download and install Java in layer.
-	ctx.Logf("Installing Java v%s", version)
-
-	command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s --strip-components=1", archiveURL, l.Path)
-	ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution)
-
-	ctx.SetMetadata(l, versionKey, version)
-	return nil
+	_, err = runtime.InstallTarballIfNotCached(ctx, runtime.OpenJDK, featureVersion, l)
+	return err
 }
 
 type binaryPkg struct {

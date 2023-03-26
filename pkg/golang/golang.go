@@ -51,7 +51,7 @@ var (
 
 // SupportsAppEngineApis is a Go buildpack specific function that returns true if App Engine API access is enabled
 func SupportsAppEngineApis(ctx *gcp.Context) (bool, error) {
-	if os.Getenv(env.Runtime) == "go111" {
+	if IsGo111Runtime() {
 		return true, nil
 	}
 
@@ -64,10 +64,18 @@ func SupportsAutoVendor(ctx *gcp.Context) (bool, error) {
 	return VersionMatches(ctx, ">=1.14.0")
 }
 
-// SupportsGoProxyFallback returns true if the Go versioin supports fallback in GOPROXY using the pipe character.
+// SupportsGoProxyFallback returns true if the Go version supports fallback in GOPROXY using the pipe character.
 // This feature is supported by Go 1.15 and higher.
 func SupportsGoProxyFallback(ctx *gcp.Context) (bool, error) {
 	return VersionMatches(ctx, ">=1.15.0")
+}
+
+// SupportsGoCleanModCache returns true if the Go version supports `go clean -modcache` without loading the packages.
+// The command fails if the packages aren't available for Go 1.12 and lower.
+// The feature to skip loading the packages is only supported by Go 1.13 and higher.
+// More information can be found at golang.org/issue/28680 and golang.org/issue/28459.
+func SupportsGoCleanModCache(ctx *gcp.Context) (bool, error) {
+	return VersionMatches(ctx, ">=1.13.0")
 }
 
 // VersionMatches checks if the installed version of Go and the version specified in go.mod match the given version range.
@@ -110,7 +118,10 @@ func VersionMatches(ctx *gcp.Context, versionRange string) (bool, error) {
 
 // GoVersion reads the version of the installed Go runtime.
 func GoVersion(ctx *gcp.Context) (string, error) {
-	v := readGoVersion(ctx)
+	v, err := readGoVersion(ctx)
+	if err != nil {
+		return "", err
+	}
 
 	match := goVersionRegexp.FindStringSubmatch(v)
 	if len(match) < 2 || match[1] == "" {
@@ -141,8 +152,21 @@ func GoModVersion(ctx *gcp.Context) (string, error) {
 
 // readGoVersion returns the output of `go version`.
 // It can be overridden for testing.
-var readGoVersion = func(ctx *gcp.Context) string {
-	return ctx.Exec([]string{"go", "version"}).Stdout
+var readGoVersion = func(ctx *gcp.Context) (string, error) {
+	result, err := ctx.Exec([]string{"go", "version"})
+	if err != nil {
+		return "", err
+	}
+	return result.Stdout, nil
+}
+
+// cleanModCache deletes the downloaded cached dependencies using `go clean -modcache`.
+// The cached dependencies are written without write access and attempt
+// to clear layer using ctx.ClearLayer(l) fails with permission denied errors.
+// It can be overridden for testing.
+var cleanModCache = func(ctx *gcp.Context) error {
+	_, err := ctx.Exec([]string{"go", "clean", "-modcache"})
+	return err
 }
 
 // readGoMod reads the go.mod file if present. If not present, returns an empty string.
@@ -176,14 +200,22 @@ func NewGoWorkspaceLayer(ctx *gcp.Context) (*libcnb.Layer, error) {
 	// Set GOPROXY to ensure no additional dependency is downloaded at built time.
 	// All of them are downloaded here.
 	l.BuildEnvironment.Override("GOPROXY", "off")
+
+	shouldEnablePkgCache, err := SupportsGoCleanModCache(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("checking for go pkg cache support: %w", err)
+	}
+	if !shouldEnablePkgCache {
+		l.Cache = false
+		return l, nil
+	}
+
 	sha, err := cache.Hash(ctx, cache.WithFiles(goModPath(ctx)))
 	if err != nil {
 		if os.IsNotExist(err) {
 			// when go.mod doesn't exist, clear any previously cached bits and return an empty layer
 			l.Cache = false
-			if err := ctx.ClearLayer(l); err != nil {
-				return nil, fmt.Errorf("clearing layer %q: %w", l.Name, err)
-			}
+			cleanModCache(ctx)
 			return l, nil
 		}
 		return nil, err
@@ -195,9 +227,7 @@ func NewGoWorkspaceLayer(ctx *gcp.Context) (*libcnb.Layer, error) {
 		return l, nil
 	}
 	ctx.Debugf("go.mod SHA has changed: clearing GOPATH layer's cache")
-	if err := ctx.ClearLayer(l); err != nil {
-		return nil, fmt.Errorf("clearing layer %q: %w", l.Name, err)
-	}
+	cleanModCache(ctx)
 	ctx.SetMetadata(l, goModCacheKey, shaStr)
 	return l, nil
 }
@@ -217,15 +247,21 @@ func ExecWithGoproxyFallback(ctx *gcp.Context, cmd []string, opts ...gcp.ExecOpt
 	}
 	if supportsGoProxy {
 		opts = append(opts, gcp.WithEnv("GOPROXY=https://proxy.golang.org|direct"))
-		return ctx.Exec(cmd, opts...), nil
+		return ctx.Exec(cmd, opts...)
 	}
 
-	result, err := ctx.ExecWithErr(cmd, opts...)
+	result, err := ctx.Exec(cmd, opts...)
 	if err == nil {
 		return result, nil
 	}
 	ctx.Warnf("%q failed. Retrying with GOSUMDB=off GOPROXY=direct. Error: %v", strings.Join(cmd, " "), err)
 
 	opts = append(opts, gcp.WithEnv("GOSUMDB=off", "GOPROXY=direct"))
-	return ctx.Exec(cmd, opts...), nil
+	return ctx.Exec(cmd, opts...)
+}
+
+// IsGo111Runtime returns true when the GOOGLE_RUNTIME is go111. This will be
+// true when using GCF or GAE with go 1.11.
+func IsGo111Runtime() bool {
+	return os.Getenv(env.Runtime) == "go111"
 }

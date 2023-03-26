@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "python",
+    version = "0.9.0",
     visibility = [
         "//builders:python_builders",
     ],
@@ -26,6 +28,7 @@ go_binary(
     deps = [
         "//pkg/appengine",
         "//pkg/appstart",
+        "//pkg/env",
         "//pkg/gcpbuildpack",
         "@com_github_masterminds_semver//:go_default_library",
     ],

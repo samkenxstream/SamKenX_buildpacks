@@ -23,8 +23,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/fetch"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
-	"github.com/GoogleCloudPlatform/buildpacks/pkg/runtime"
 	"github.com/buildpacks/libcnb"
 )
 
@@ -43,6 +44,10 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if _, ok := os.LookupEnv(env.FunctionTarget); ok {
+		// functions-frameworks buildpack expect composer sdk to be installed always.
+		return gcp.OptInAlways(), nil
+	}
 	composerJSONExists, err := ctx.FileExists(composerJSON)
 	if err != nil {
 		return nil, err
@@ -84,18 +89,23 @@ func buildFn(ctx *gcp.Context) error {
 	}
 	defer os.Remove(installer.Name())
 
-	if err := runtime.FetchURL(composerSetupURL, installer); err != nil {
+	if err := fetch.GetURL(composerSetupURL, installer); err != nil {
 		return fmt.Errorf("failed to download composer installer from %s: %w", composerSetupURL, err)
 	}
 
 	// verify the installer hash
 	var expectedSHABuf bytes.Buffer
-	if err := runtime.FetchURL(composerSigURL, io.Writer(&expectedSHABuf)); err != nil {
+	if err := fetch.GetURL(composerSigURL, io.Writer(&expectedSHABuf)); err != nil {
 		return fmt.Errorf("failed to fetch the installer signature from %s: %w", composerSigURL, err)
 	}
 	expectedSHA := expectedSHABuf.String()
-	actualSHACmd := fmt.Sprintf("php -r \"echo hash_file('sha384', '%s');\"", installer.Name())
-	actualSHA := ctx.Exec([]string{"bash", "-c", actualSHACmd}).Stdout
+	// Disable the deprecated warnings inline using -d 'error_reporting=24575' flag while we add php.ini.
+	actualSHACmd := fmt.Sprintf("php -d 'error_reporting=24575' -r \"echo hash_file('sha384', '%s');\"", installer.Name())
+	result, err := ctx.Exec([]string{"bash", "-c", actualSHACmd})
+	if err != nil {
+		return err
+	}
+	actualSHA := result.Stdout
 	if actualSHA != expectedSHA {
 		return fmt.Errorf("invalid composer installer found at %q: checksum for composer installer, %q, does not match expected checksum of %q", composerSetupURL, actualSHA, expectedSHA)
 	}
@@ -107,7 +117,9 @@ func buildFn(ctx *gcp.Context) error {
 		return fmt.Errorf("creating bin folder: %w", err)
 	}
 	installCmd := fmt.Sprintf("php %s --install-dir %s --filename composer --version %s", installer.Name(), clBin, composerVer)
-	ctx.Exec([]string{"bash", "-c", installCmd})
+	if _, err := ctx.Exec([]string{"bash", "-c", installCmd}); err != nil {
+		return err
+	}
 
 	ctx.SetMetadata(l, versionKey, composerVer)
 	return nil

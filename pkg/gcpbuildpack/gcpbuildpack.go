@@ -56,7 +56,7 @@ const (
 )
 
 var (
-	logger         = log.New(os.Stderr, "", 0)
+	defaultLogger  = log.New(os.Stderr, "", 0)
 	labelKeyRegexp = regexp.MustCompile(labelKeyRegexpStr)
 )
 
@@ -73,13 +73,15 @@ type stats struct {
 
 // Context provides contextually aware functions for buildpack authors.
 type Context struct {
-	info            libcnb.BuildpackInfo
-	applicationRoot string
-	buildpackRoot   string
-	debug           bool
-	stats           stats
-	exiter          Exiter
-	warnings        []string
+	info                     libcnb.BuildpackInfo
+	applicationRoot          string
+	buildpackRoot            string
+	debug                    bool
+	logger                   *log.Logger
+	installedRuntimeVersions []string
+	stats                    stats
+	exiter                   Exiter
+	warnings                 []string
 
 	// detect items
 	detectContext libcnb.DetectContext
@@ -130,16 +132,32 @@ func WithExecCmd(execCmd func(name string, args ...string) *exec.Cmd) ContextOpt
 	}
 }
 
+// WithLogger override the logger implementation, this is useful for unit tests
+// which want to verify logging output.
+func WithLogger(logger *log.Logger) ContextOption {
+	return func(ctx *Context) {
+		ctx.logger = logger
+	}
+}
+
+// WithStackID sets the StackID in Context.
+func WithStackID(stackID string) ContextOption {
+	return func(ctx *Context) {
+		ctx.buildContext.StackID = stackID
+	}
+}
+
 // NewContext creates a context.
 func NewContext(opts ...ContextOption) *Context {
 	debug, err := env.IsDebugMode()
 	if err != nil {
-		logger.Printf("Failed to parse debug mode: %v", err)
+		defaultLogger.Printf("Failed to parse debug mode: %v", err)
 		os.Exit(1)
 	}
 	ctx := &Context{
 		debug:   debug,
 		execCmd: exec.Command,
+		logger:  defaultLogger,
 	}
 	ctx.exiter = defaultExiter{ctx: ctx}
 	for _, o := range opts {
@@ -191,6 +209,11 @@ func (ctx *Context) BuildpackRoot() string {
 	return ctx.buildpackRoot
 }
 
+// StackID returns the stack id.
+func (ctx *Context) StackID() string {
+	return ctx.buildContext.StackID
+}
+
 // Debug returns whether debug mode is enabled.
 func (ctx *Context) Debug() bool {
 	return ctx.debug
@@ -209,7 +232,7 @@ func Main(d DetectFn, b BuildFn) {
 	case "build":
 		build(b)
 	default:
-		logger.Print("Unknown command, expected 'detect' or 'build'.")
+		defaultLogger.Print("Unknown command, expected 'detect' or 'build'.")
 		os.Exit(1)
 	}
 }
@@ -297,7 +320,7 @@ func (ctx *Context) Exit(exitCode int, be *buildererror.Error) {
 
 // Logf emits a structured logging line.
 func (ctx *Context) Logf(format string, args ...interface{}) {
-	logger.Printf(format, args...)
+	ctx.logger.Printf(format, args...)
 }
 
 // Debugf emits a structured logging line if the debug flag is set.
@@ -317,7 +340,7 @@ func (ctx *Context) Warnf(format string, args ...interface{}) {
 // Tipf emits a structured logging line for usage tips.
 func (ctx *Context) Tipf(format string, args ...interface{}) {
 	// Tips are only displayed for the gcp/base builder, not in GAE/GCF environments.
-	if os.Getenv("CNB_STACK_ID") == "google" {
+	if env.IsGCP() {
 		ctx.Logf(format, args...)
 	}
 }
@@ -345,6 +368,17 @@ func (ctx *Context) Span(label string, start time.Time, status buildererror.Stat
 		ctx.Warnf("Invalid span dropped: %v", err)
 	}
 	ctx.stats.spans = append(ctx.stats.spans, si)
+}
+
+// InstalledRuntimeVersions returns the list of runtime versions installed during build time.
+func (ctx *Context) InstalledRuntimeVersions() []string {
+	return ctx.installedRuntimeVersions
+}
+
+// AddInstalledRuntimeVersion adds a runtime version to the list of installed runtimes. Used
+// for versionless runtimes to provide feedback on the runtime version selected at build time.
+func (ctx *Context) AddInstalledRuntimeVersion(version string) {
+	ctx.installedRuntimeVersions = append(ctx.installedRuntimeVersions, version)
 }
 
 // AddBOMEntry adds an entry to the bill of materials.

@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -41,6 +42,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/Masterminds/semver"
 	"github.com/rs/xid"
 
 	"github.com/GoogleCloudPlatform/buildpacks/internal/checktools"
@@ -58,6 +60,7 @@ var (
 	structureTestConfig string // Path to container test configuration file.
 	builderSource       string // Path to directory or archive containing builder source.
 	builderImage        string // Name of the builder image to test; takes precedence over builderSource.
+	runImageOverride    string // Name of the run image to use during the test. This takes preference over the run-image defined in the builder.toml.
 	builderPrefix       string // Prefix for created builder image.
 	keepArtifacts       bool   // If true, keeps intermediate artifacts such as application images.
 	packBin             string // Path to pack binary.
@@ -65,9 +68,9 @@ var (
 	lifecycle           string // Path to lifecycle archive; optional.
 	pullImages          bool   // Pull stack images instead of using local daemon.
 	cloudbuild          bool   // Use cloudbuild network; required for Cloud Build.
-	runtimeVersions     string // Comma separated list of runtime versions to test, or "json" if using json file.
-
-	specialChars = regexp.MustCompile("[^a-zA-Z0-9]+")
+	runtimeVersion      string // A runtime version which will be applied to tests that do not explicilty set a version.
+	runtimeName         string // The name of the runtime (aka the language name such as 'go' or 'dotnet'). Used to properly set GOOGLE_RUNTIME.
+	specialChars        = regexp.MustCompile("[^a-zA-Z0-9]+")
 )
 
 type requestType string
@@ -94,6 +97,7 @@ func DefineFlags() {
 	flag.StringVar(&structureTestConfig, "structure-test-config", "", "Location of the container structure test configuration.")
 	flag.StringVar(&builderSource, "builder-source", "", "Location of the builder source files.")
 	flag.StringVar(&builderImage, "builder-image", "", "Name of the builder image to test; takes precedence over builderSource.")
+	flag.StringVar(&runImageOverride, "run-image-override", "", "Name of the run image to use during the test. This takes preference over the run-image defined in the builder.toml.")
 	flag.StringVar(&builderPrefix, "builder-prefix", "acceptance-test-builder-", "Prefix for the generated builder image.")
 	flag.BoolVar(&keepArtifacts, "keep-artifacts", false, "Keep images and other artifacts after tests have finished.")
 	flag.StringVar(&packBin, "pack", "pack", "Path to pack binary.")
@@ -101,7 +105,8 @@ func DefineFlags() {
 	flag.StringVar(&lifecycle, "lifecycle", "", "Location of lifecycle archive. Overrides builder.toml if specified.")
 	flag.BoolVar(&pullImages, "pull-images", true, "Pull stack images before running the tests.")
 	flag.BoolVar(&cloudbuild, "cloudbuild", false, "Use cloudbuild network; required for Cloud Build.")
-	flag.StringVar(&runtimeVersions, "runtime-versions", "", "Comma separated list of runtime versions to override in tests.")
+	flag.StringVar(&runtimeVersion, "runtime-version", "", "A default runtime version which will be applied to the tests that do not explicitly set a version.")
+	flag.StringVar(&runtimeName, "runtime-name", "", "The name of the runtime (aka the language name such as 'go' or 'dotnet'). Used to properly set GOOGLE_RUNTIME.")
 
 }
 
@@ -145,8 +150,8 @@ type Test struct {
 	Entrypoint string
 	// MustMatch specifies the expected response, if not provided "PASS" will be used.
 	MustMatch string
-	// SkipCacheTest skips testing of cached builds for this test case.
-	SkipCacheTest bool
+	// EnableCacheTest enables a second run of the test with the buildpacks cache enabled.
+	EnableCacheTest bool
 	// MustUse specifies the IDs of the buildpacks that must be used during the build.
 	MustUse []string
 	// MustNotUse specifies the IDs of the buildpacks that must not be used during the build.
@@ -175,11 +180,43 @@ type Test struct {
 	BOM []BOMEntry
 	// Setup is a function that sets up the source directory before test.
 	Setup setupFunc
+	// VersionInclusionConstraint is a 'semver' inclusion filter for runtime versions. The FilterTest
+	// method  will only return test cases with an inclusion constrant that matches with the value of the
+	// `-runtime-version` flag. When the inclusion constraint or `runtime-version` flag are empty all
+	// tests are included. See semver documentation to learn what is possible.
+	VersionInclusionConstraint string
+	// SkipStacks is slice of buildpack stack IDs that this test case should not be run on. This is
+	// useful for excluding apps that do not compile on the min stack.
+	SkipStacks []string
+}
+
+// SetupContext is passed into the Test.Setup function, it gives the setupFunc implementor access
+// to various fields to determine what modifications they should make to their source.
+type SetupContext struct {
+	// SrcDir contains a path to a modifable copy of the source on local disk that will be copied
+	// to the build environment at /workspace.
+	SrcDir string
+	// Builder is the name of the builder image.
+	Builder string
+	// RuntimeVersion is the version for which this test run will be performed.
+	RuntimeVersion string
+}
+
+// ImageContext holds information about the buildpack stack images used for a test. It is returned
+// by ProvisionImages and must be passed as an argument to TestApp and TestBuildFailure.
+type ImageContext struct {
+	// The ID of the builpack stack.
+	StackID string
+	// The builder image name.
+	BuilderImage string
+	// The run image name.
+	RunImage string
 }
 
 // setupFunc is a function that is called before the test starts and can be used to modify the test source.
-// The function has access to the builder image name and a directory with a modifiable copy of the source
-type setupFunc func(builder, srcDir string) error
+// The setupCtx.SrcDir property contains a path to a copy of the source which can be modified before the
+// test runs.
+type setupFunc func(setupCtx SetupContext) error
 
 // BOMEntry represents a bill-of-materials entry in the image metadata.
 type BOMEntry struct {
@@ -187,18 +224,28 @@ type BOMEntry struct {
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// builderTOML contains the values from builder.toml file
+type builderTOML struct {
+	Stack struct {
+		ID         string `toml:"id"`
+		RunImage   string `toml:"run-image"`
+		BuildImage string `toml:"build-image"`
+	} `toml:"stack"`
+}
+
 // TestApp builds and a single application and verifies that it runs and handles requests.
-func TestApp(t *testing.T, builder string, cfg Test) {
+func TestApp(t *testing.T, imageCtx ImageContext, cfg Test) {
 	t.Helper()
 
-	env := envSliceAsMap(t, cfg.Env)
-	env["GOOGLE_DEBUG"] = "true"
+	env := prepareEnvTest(t, cfg)
 
 	if cfg.Name == "" {
 		cfg.Name = cfg.App
 	}
+
 	// Docker image names may not contain underscores or start with a capital letter.
-	image := fmt.Sprintf("%s-%s", strings.ToLower(specialChars.ReplaceAllString(cfg.Name, "-")), builder)
+	builderName, runName := imageCtx.BuilderImage, imageCtx.RunImage
+	image := fmt.Sprintf("%s-%s", strings.ToLower(specialChars.ReplaceAllString(cfg.Name, "-")), builderName)
 
 	// Delete the docker image and volumes created by pack during the build.
 	defer func() {
@@ -212,22 +259,31 @@ func TestApp(t *testing.T, builder string, cfg Test) {
 	// Run Setup function if provided.
 	src := filepath.Join(testData, cfg.App)
 	if cfg.Setup != nil {
-		src = setupSource(t, cfg.Setup, builder, src, cfg.App)
+		src = setupSource(t, cfg.Setup, builderName, src, cfg.App)
 	}
 
-	// Run a no-cache build, followed by a cache build, unless caching is disabled for the app.
-	cacheOptions := []bool{false}
-	if !cfg.SkipCacheTest {
-		cacheOptions = append(cacheOptions, true)
+	if cfg.EnableCacheTest {
+		testAppWithCache(t, src, image, builderName, runName, env, checks, cfg)
+	} else {
+		testApp(t, src, image, builderName, runName, env, false, checks, cfg)
 	}
-	for _, cache := range cacheOptions {
-		t.Run(fmt.Sprintf("cache %t", cache), func(t *testing.T) {
-			buildApp(t, src, image, builder, env, cache, cfg)
-			verifyBuildMetadata(t, image, cfg.MustUse, cfg.MustNotUse, cfg.BOM)
-			verifyStructure(t, image, builder, cache, checks)
-			invokeApp(t, cfg, image, cache)
-		})
-	}
+}
+
+func testAppWithCache(t *testing.T, src, image, builderName, runName string, env map[string]string, checks *StructureTest, cfg Test) {
+	// Run a no-cache build, followed by a cache build
+	t.Run("cache false", func(t *testing.T) {
+		testApp(t, src, image, builderName, runName, env, false, checks, cfg)
+	})
+	t.Run("cache true", func(t *testing.T) {
+		testApp(t, src, image, builderName, runName, env, true, checks, cfg)
+	})
+}
+
+func testApp(t *testing.T, src, image, builderName, runName string, env map[string]string, cacheEnabled bool, checks *StructureTest, cfg Test) {
+	buildApp(t, src, image, builderName, runName, env, cacheEnabled, cfg)
+	verifyBuildMetadata(t, image, cfg.MustUse, cfg.MustNotUse, cfg.BOM)
+	verifyStructure(t, image, builderName, cacheEnabled, checks)
+	invokeApp(t, cfg, image, cacheEnabled)
 }
 
 // FailureTest describes a failure test.
@@ -244,23 +300,24 @@ type FailureTest struct {
 	SkipBuilderOutputMatch bool
 	// Setup is a function that sets up the source directory before test.
 	Setup setupFunc
+	// VersionInclusionConstraint is a 'semver' inclusion filter for runtime versions. The FilterTest
+	// method  will only return test cases with an inclusion constrant that matches with the value of the
+	// `-runtime-version` flag. When the inclusion constraint or `runtime-version` flag are empty all
+	// tests are included. See semver documentation to learn what is possible.
+	VersionInclusionConstraint string
 }
 
 // TestBuildFailure runs a build and ensures that it fails. Additionally, it ensures the emitted logs match mustMatch regexps.
-func TestBuildFailure(t *testing.T, builder string, cfg FailureTest) {
+func TestBuildFailure(t *testing.T, imageCtx ImageContext, cfg FailureTest) {
 	t.Helper()
 
-	env := envSliceAsMap(t, cfg.Env)
-	env["GOOGLE_DEBUG"] = "true"
-	if !cfg.SkipBuilderOutputMatch {
-		env["BUILDER_OUTPUT"] = "/tmp/builderoutput"
-		env["EXPECTED_BUILDER_OUTPUT"] = cfg.MustMatch
-	}
+	env := prepareEnvFailureTest(t, cfg)
 
 	if cfg.Name == "" {
 		cfg.Name = cfg.App
 	}
-	image := fmt.Sprintf("%s-%s", strings.ToLower(specialChars.ReplaceAllString(cfg.Name, "-")), builder)
+	builderName, runName := imageCtx.BuilderImage, imageCtx.RunImage
+	image := fmt.Sprintf("%s-%s", strings.ToLower(specialChars.ReplaceAllString(cfg.Name, "-")), builderName)
 
 	// Delete the docker volumes created by pack during the build.
 	if !keepArtifacts {
@@ -269,10 +326,10 @@ func TestBuildFailure(t *testing.T, builder string, cfg FailureTest) {
 
 	src := filepath.Join(testData, cfg.App)
 	if cfg.Setup != nil {
-		src = setupSource(t, cfg.Setup, builder, src, cfg.App)
+		src = setupSource(t, cfg.Setup, builderName, src, cfg.App)
 	}
 
-	outb, errb, cleanup := buildFailingApp(t, src, image, builder, env)
+	outb, errb, cleanup := buildFailingApp(t, src, image, builderName, runName, env)
 	defer cleanup()
 
 	r, err := regexp.Compile(cfg.MustMatch)
@@ -287,8 +344,10 @@ func TestBuildFailure(t *testing.T, builder string, cfg FailureTest) {
 		t.Errorf("Expected regexp %q not found in stdout or stderr:\n\nstdout:\n\n%s\n\nstderr:\n\n%s", r, outb, errb)
 	}
 	expectedLog := "Expected pattern included in error output: true"
-	if !cfg.SkipBuilderOutputMatch && !strings.Contains(string(errb), expectedLog) {
+	builderOutput := string(errb)
+	if !cfg.SkipBuilderOutputMatch && !strings.Contains(builderOutput, expectedLog) {
 		t.Errorf("Expected regexp %q not found in BUILDER_OUTPUT", r)
+		t.Logf("BUILDER_OUTPUT: %v", builderOutput)
 	}
 }
 
@@ -525,8 +584,18 @@ func cleanUpImage(t *testing.T, name string) {
 	}
 }
 
-// CreateBuilder creates a builder image.
-func CreateBuilder(t *testing.T) (string, func()) {
+// ProvisionImages provisions the builder, build, and run images necessary for running
+// a test.
+//
+// The 'builderName' return value is the name of the builder image.
+// The 'runName' return value is the name of the run image. This value will be the
+// empty string when the run image is not override and the builder's default run
+// image is to be used.
+//
+// The 'cleanup' return value is a function which should be run after the tests are
+// complete to clean up the images which are explicitly created. Images that are
+// pulled are not cleaned up to prevent conflicts with other tests.
+func ProvisionImages(t *testing.T) (ImageContext, func()) {
 	t.Helper()
 
 	if err := checktools.Installed(); err != nil {
@@ -536,7 +605,7 @@ func CreateBuilder(t *testing.T) (string, func()) {
 		t.Fatalf("Error checking pack version: %v", err)
 	}
 
-	name := builderPrefix + randString(10)
+	builderName := generateRandomImageName(builderPrefix)
 
 	if builderImage != "" {
 		t.Logf("Testing existing builder image: %s", builderImage)
@@ -544,20 +613,27 @@ func CreateBuilder(t *testing.T) (string, func()) {
 			if _, err := runOutput("docker", "pull", builderImage); err != nil {
 				t.Fatalf("Error pulling %s: %v", builderImage, err)
 			}
-			run, err := runImageFromMetadata(builderImage)
-			if err != nil {
-				t.Fatalf("Error extracting run image from image %s: %v", builderImage, err)
-			}
-			if _, err := runOutput("docker", "pull", run); err != nil {
-				t.Fatalf("Error pulling %s: %v", run, err)
-			}
 		}
 		// Pack cache is based on builder name; retag with a unique name.
-		if _, err := runOutput("docker", "tag", builderImage, name); err != nil {
-			t.Fatalf("Error tagging %s as %s: %v", builderImage, name, err)
+		if _, err := runOutput("docker", "tag", builderImage, builderName); err != nil {
+			t.Fatalf("Error tagging %s as %s: %v", builderImage, builderName, err)
 		}
-		return name, func() {
-			cleanUpImage(t, name)
+		runName, cleanUpRun, err := provisionRunImageFromBuilder(builderName)
+		if err != nil {
+			t.Fatalf("Error provisioning run image for builder %q: %v", builderName, err)
+		}
+		stackID, err := getImageStackID(builderName)
+		if err != nil {
+			t.Fatalf("Getting stack ID from builder %q: %v", builderName, err)
+		}
+		imageCtx := ImageContext{
+			StackID:      stackID,
+			BuilderImage: builderName,
+			RunImage:     runName,
+		}
+		return imageCtx, func() {
+			cleanUpImage(t, builderName)
+			cleanUpRun(t)
 		}
 	}
 
@@ -573,26 +649,28 @@ func CreateBuilder(t *testing.T) (string, func()) {
 		}
 	}
 
-	run, build, err := stackImagesFromConfig(config)
+	builderConfig, err := readBuilderTOML(config)
 	if err != nil {
-		t.Fatalf("Error extracting stack images from %s: %v", config, err)
+		t.Fatalf("Error reading builder.toml: %v", err)
 	}
 	// Pull images once in the beginning to prevent them from changing in the middle of testing.
 	// The images are intentionally not cleaned up to prevent conflicts across different test targets.
 	if pullImages {
-		if _, err := runOutput("docker", "pull", run); err != nil {
-			t.Fatalf("Error pulling %s: %v", run, err)
+		buildName := builderConfig.Stack.BuildImage
+		if _, err := runOutput("docker", "pull", buildName); err != nil {
+			t.Fatalf("Error pulling %s: %v", buildName, err)
 		}
-		if _, err := runOutput("docker", "pull", build); err != nil {
-			t.Fatalf("Error pulling %s: %v", build, err)
-		}
+	}
+	runName, cleanUpRun, err := provisionRunImageFromTOML(builderConfig)
+	if err != nil {
+		t.Fatalf("Error provisioning run image: %v", err)
 	}
 
 	// Pack command to create the builder.
-	args := strings.Fields(fmt.Sprintf("builder create %s --config %s --pull-policy never --verbose --no-color", name, config))
+	args := strings.Fields(fmt.Sprintf("builder create %s --config %s --pull-policy never --verbose --no-color", builderName, config))
 	cmd := exec.Command(packBin, args...)
 
-	outFile, errFile, cleanup := outFiles(t, name, "pack", "create-builder")
+	outFile, errFile, cleanup := outFiles(t, builderName, "pack", "create-builder")
 	defer cleanup()
 	var outb, errb bytes.Buffer
 	cmd.Stdout = io.MultiWriter(outFile, &outb) // pack emits some errors to stdout.
@@ -603,12 +681,113 @@ func CreateBuilder(t *testing.T) (string, func()) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Error creating builder: %v, logs:\nstdout: %s\nstderr:%s", err, outb.String(), errb.String())
 	}
-	t.Logf("Successfully created builder: %s (in %s)", name, time.Since(start))
+	t.Logf("Successfully created builder: %s (in %s)", builderName, time.Since(start))
 
-	return name, func() {
-		cleanUpImage(t, name)
-		cleanUpBuilder()
+	imageCtx := ImageContext{
+		StackID:      builderConfig.Stack.ID,
+		BuilderImage: builderName,
+		RunImage:     runName,
 	}
+
+	return imageCtx, func() {
+		cleanUpImage(t, builderName)
+		cleanUpBuilder()
+		cleanUpRun(t)
+	}
+}
+
+func provisionRunImageFromTOML(builderConfig *builderTOML) (string, func(t *testing.T), error) {
+	runName := builderConfig.Stack.RunImage
+	if runImageOverride != "" {
+		runName = runImageOverride
+	}
+	if pullImages {
+		if _, err := runOutput("docker", "pull", runName); err != nil {
+			return "", nil, fmt.Errorf("pulling %q: %w", runName, err)
+		}
+	}
+	if runName == builderConfig.Stack.RunImage {
+		// when the run image name is the one defined in the builderconfig, do not verify the stack ids
+		// match because a builder.toml should contain valid configuration.
+		return runName, func(t *testing.T) {}, nil
+	}
+	return provisionImageWithMatchingStackID(runName, builderConfig.Stack.ID)
+}
+
+func provisionRunImageFromBuilder(builderName string) (string, func(t *testing.T), error) {
+	builderDefinedRunImage, err := runImageFromMetadata(builderName)
+	if err != nil {
+		return "", nil, fmt.Errorf("Error extracting run image from image %q: %w", builderName, err)
+	}
+	runName := builderDefinedRunImage
+	if runImageOverride != "" {
+		runName = runImageOverride
+	}
+	if pullImages {
+		if _, err := runOutput("docker", "pull", runName); err != nil {
+			return "", nil, fmt.Errorf("pulling %q: %w", runName, err)
+		}
+	}
+	if builderDefinedRunImage == runName {
+		// when the run image is the one defined for the builder, do not verify the stack ids match
+		// because the builder should contain valid configuration.
+		return runName, func(t *testing.T) {}, nil
+	}
+	builderStackID, err := getImageStackID(builderName)
+	if err != nil {
+		return "", nil, fmt.Errorf("getting stack id of builder %q: %w", builderName, err)
+	}
+	return provisionImageWithMatchingStackID(runName, builderStackID)
+}
+
+// provisionImageWithMatchingStackId returns an image with the contents of 'fromImage' and a stack
+// ID of 'stackID'. The second return value is a cleanUp function which will destroy the returned
+// image if the image was newly created. The cleanUp function is a no-op if the fromImage already
+// had the desired stackID.
+//
+// This function is useful for ensuring a run image has the same stack id as the builder. This is
+// necessary because pack requires that the two match.
+func provisionImageWithMatchingStackID(fromImage, stackID string) (string, func(t *testing.T), error) {
+	imageStackID, err := getImageStackID(fromImage)
+	if err != nil {
+		return "", nil, fmt.Errorf("getting stack id of image %q: %w", fromImage, err)
+	}
+	if imageStackID == stackID {
+		return fromImage, func(t *testing.T) {}, nil
+	}
+	newImage, err := newImageWithStackID(fromImage, stackID)
+	if err != nil {
+		return "", nil, fmt.Errorf("creating image from %q with stack id %q: %w", fromImage, stackID, err)
+	}
+	cleanUp := func(t *testing.T) {
+		cleanUpImage(t, newImage)
+	}
+	return newImage, cleanUp, nil
+}
+
+func getImageStackID(image string) (string, error) {
+	out, err := runOutput("docker", "inspect", `--format={{index .Config.Labels "io.buildpacks.stack.id"}}`, image)
+	if err != nil {
+		return "", fmt.Errorf("getting stack id from docker inspect: %w", err)
+	}
+	return out, nil
+}
+
+func newImageWithStackID(fromImage, stackID string) (string, error) {
+	newImage := generateRandomImageName(fromImage)
+	_, err := runCombinedOutput("bash", "-c", fmt.Sprintf(`echo "FROM %s" | docker build --label io.buildpacks.stack.id="%s" -t "%s" -`, fromImage, stackID, newImage))
+	if err != nil {
+		return "", fmt.Errorf("changing stack id label on %q: %v", fromImage, err)
+	}
+	return newImage, nil
+}
+
+func generateRandomImageName(baseName string) string {
+	rand := randString(10)
+	if strings.Contains(baseName, ":") {
+		return fmt.Sprintf("%v_%v", baseName, rand)
+	}
+	return baseName + rand
 }
 
 func extractBuilder(t *testing.T, builderSource string) (string, func()) {
@@ -673,7 +852,7 @@ func runImageFromMetadata(image string) (string, error) {
 	format := "--format={{(index (index .Config.Labels) \"io.buildpacks.builder.metadata\")}}"
 	out, err := runOutput("docker", "inspect", image, format)
 	if err != nil {
-		return "", fmt.Errorf("reading builer metadata: %v", err)
+		return "", fmt.Errorf("reading builder metadata: %v", err)
 	}
 
 	var metadata struct {
@@ -699,7 +878,7 @@ func setupSource(t *testing.T, setup setupFunc, builder, src, app string) string
 	if cloudbuild {
 		root = "/workspace"
 	}
-	temp, err := ioutil.TempDir(root, app)
+	temp, err := ioutil.TempDir(root, path.Base(app))
 	if err != nil {
 		t.Fatalf("Error creating temporary directory: %v", err)
 	}
@@ -708,33 +887,35 @@ func setupSource(t *testing.T, setup setupFunc, builder, src, app string) string
 	if _, err := runOutput("cp", "-R", src+sep+".", temp); err != nil {
 		t.Fatalf("Error copying app files: %v", err)
 	}
-	if err := setup(builder, temp); err != nil {
+	setupCtx := SetupContext{
+		SrcDir:         temp,
+		Builder:        builder,
+		RuntimeVersion: runtimeVersion,
+	}
+	if err := setup(setupCtx); err != nil {
 		t.Fatalf("Error running test setup: %v", err)
 	}
 	return temp
 }
 
-// stackImagesFromConfig returns the run images specified by the given builder.toml.
-func stackImagesFromConfig(path string) (string, string, error) {
-	p, err := ioutil.ReadFile(path)
+func readBuilderTOML(path string) (*builderTOML, error) {
+	bytes, err := os.ReadFile(path)
 	if err != nil {
-		return "", "", fmt.Errorf("reading %s: %v", path, err)
+		return nil, fmt.Errorf("reading %q: %w", path, err)
 	}
-	var config struct {
-		Stack struct {
-			RunImage   string `toml:"run-image"`
-			BuildImage string `toml:"build-image"`
-		} `toml:"stack"`
+	var bc builderTOML
+	if err := toml.Unmarshal(bytes, &bc); err != nil {
+		return nil, fmt.Errorf("unmarshalling %q: %w", path, err)
 	}
-	if err := toml.Unmarshal(p, &config); err != nil {
-		return "", "", fmt.Errorf("unmarshaling %s: %v", path, err)
-	}
-	return config.Stack.RunImage, config.Stack.BuildImage, nil
+	return &bc, nil
 }
 
-func buildCommand(srcDir, image, builder string, env map[string]string, cache bool) []string {
+func buildCommand(srcDir, image, builderName, runName string, env map[string]string, cache bool) []string {
 	// Pack command to build app.
-	args := strings.Fields(fmt.Sprintf("%s build %s --builder %s --path %s --pull-policy never --verbose --no-color --trust-builder", packBin, image, builder, srcDir))
+	args := strings.Fields(fmt.Sprintf("%s build %s --builder %s --path %s --pull-policy never --verbose --no-color --trust-builder", packBin, image, builderName, srcDir))
+	if runName != "" {
+		args = append(args, "--run-image", runName)
+	}
 	if !cache {
 		args = append(args, "--clear-cache")
 	}
@@ -751,7 +932,7 @@ func buildCommand(srcDir, image, builder string, env map[string]string, cache bo
 }
 
 // buildApp builds an application image from source.
-func buildApp(t *testing.T, srcDir, image, builder string, env map[string]string, cache bool, cfg Test) {
+func buildApp(t *testing.T, srcDir, image, builderName, runName string, env map[string]string, cache bool, cfg Test) {
 	t.Helper()
 
 	attempts := cfg.FlakyBuildAttempts
@@ -768,10 +949,10 @@ func buildApp(t *testing.T, srcDir, image, builder string, env map[string]string
 		if attempt > 1 {
 			filename = fmt.Sprintf("%s-attempt-%d", filename, attempt)
 		}
-		outFile, errFile, cleanup := outFiles(t, builder, "pack-build", filename)
+		outFile, errFile, cleanup := outFiles(t, builderName, "pack-build", filename)
 		defer cleanup()
 
-		bcmd := buildCommand(srcDir, image, builder, env, cache)
+		bcmd := buildCommand(srcDir, image, builderName, runName, env, cache)
 		cmd := exec.Command(bcmd[0], bcmd[1:]...)
 		cmd.Stdout = io.MultiWriter(outFile, &outb) // pack emits detect output to stdout.
 		cmd.Stderr = io.MultiWriter(errFile, &errb) // pack emits build output to stderr.
@@ -826,13 +1007,13 @@ func buildApp(t *testing.T, srcDir, image, builder string, env map[string]string
 
 // buildFailingApp attempts to build an app and ensures that it failues (non-zero exit code).
 // It returns the build's stdout, stderr and a cleanup function.
-func buildFailingApp(t *testing.T, srcDir, image, builder string, env map[string]string) ([]byte, []byte, func()) {
+func buildFailingApp(t *testing.T, srcDir, image, builderName, runName string, env map[string]string) ([]byte, []byte, func()) {
 	t.Helper()
 
-	bcmd := buildCommand(srcDir, image, builder, env, false)
+	bcmd := buildCommand(srcDir, image, builderName, runName, env, false)
 	cmd := exec.Command(bcmd[0], bcmd[1:]...)
 
-	outFile, errFile, cleanup := outFiles(t, builder, "pack-build-failing", image)
+	outFile, errFile, cleanup := outFiles(t, builderName, "pack-build-failing", image)
 	defer cleanup()
 	var outb, errb bytes.Buffer
 	cmd.Stdout = io.MultiWriter(outFile, &outb)
@@ -1108,28 +1289,23 @@ func cleanUpVolumes(t *testing.T, image string) {
 	// This logic is copied from pack's codebase.
 	fqn := "index.docker.io/library/" + image + ":latest"
 	digest := sha256.Sum256([]byte(fqn))
-	prefix := fmt.Sprintf("pack-cache-%x", digest[:6])
+	prefix := fmt.Sprintf("library_%v_latest-%x", image, digest[:6])
+	reservedNameConversions := map[string]string{
+		"aux": "a_u_x",
+		"com": "c_o_m",
+		"con": "c_o_n",
+		"lpt": "l_p_t",
+		"nul": "n_u_l",
+		"prn": "p_r_n",
+	}
+	for k, v := range reservedNameConversions {
+		prefix = strings.Replace(prefix, k, v, -1)
+	}
+	prefix = "pack-cache-" + prefix
 
 	if _, err := runOutput("docker", "volume", "rm", "-f", prefix+".launch", prefix+".build"); err != nil {
 		t.Logf("Failed to clean up cache volumes: %v", err)
 	}
-}
-
-// envSliceAsMap converts the given slice of KEY=VAL strings to a map.
-func envSliceAsMap(t *testing.T, env []string) map[string]string {
-	t.Helper()
-	result := make(map[string]string)
-	for _, kv := range env {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			t.Fatalf("Invalid environment variable: %q", kv)
-		}
-		if _, ok := result[parts[0]]; ok {
-			t.Fatalf("Env var %s is already set.", parts[0])
-		}
-		result[parts[0]] = parts[1]
-	}
-	return result
 }
 
 // PullImages returns the value of the -pull-images flag.
@@ -1137,17 +1313,84 @@ func PullImages() bool {
 	return pullImages
 }
 
-// RuntimeVersions returns the value of the -runtime-versions flag. If the flag
-// was set as "json" it checks for a version JSON file, if it was not set it
-// returns the default versions passed as arguments.
-func RuntimeVersions(runtime string, defaultVersions ...string) []string {
-	if runtimeVersions == "json" {
-		return getNewVersions(runtime)
+// FilterTests returns a new slice with only tests that should be run. Tests are filtered out if
+// their VersionInclusionConstraint does not match the `-runtime-version` flag.
+func FilterTests(t *testing.T, imageCtx ImageContext, testCases []Test) []Test {
+	results := make([]Test, 0)
+	for _, tc := range testCases {
+		if ShouldTestVersion(t, tc.VersionInclusionConstraint) && ShouldTestStack(t, imageCtx.StackID, tc.SkipStacks) {
+			results = append(results, tc)
+		}
 	}
-	if runtimeVersions != "" {
-		return strings.Split(runtimeVersions, ",")
+	return results
+}
+
+// FilterFailureTests returns a new slice with only tests that should be run. Tests are filtered out
+// if their VersionInclusionConstraint does not match the `-runtime-version` flag.
+func FilterFailureTests(t *testing.T, testCases []FailureTest) []FailureTest {
+	results := make([]FailureTest, 0)
+	for _, tc := range testCases {
+		if ShouldTestVersion(t, tc.VersionInclusionConstraint) {
+			results = append(results, tc)
+		}
 	}
-	return defaultVersions
+	return results
+}
+
+// ShouldTestStack returns true if the current test should be included on test runs using the given
+// buildpack stack.
+func ShouldTestStack(t *testing.T, stackID string, skipStacks []string) bool {
+	t.Helper()
+	for _, skipStack := range skipStacks {
+		if skipStack == stackID {
+			return false
+		}
+	}
+	return true
+}
+
+// ShouldTestVersion returns true if the current test run's version is included
+// in the constraint parameter. An empty inclusion constraint is treated as
+// matching all versions.
+//
+// The version comparison check supports partial matches. For example, an excluded
+// version of '12.5' will match all '12.5.x' versions. In addition, you can specify
+// ranges such as '>=10.0.0'. The version comparison uses semver2 for the constraint
+// comparision. See the documentation for semver2 to learn more.
+func ShouldTestVersion(t *testing.T, inclusionConstraint string) bool {
+	t.Helper()
+	if runtimeVersion == "" || inclusionConstraint == "" {
+		return true
+	}
+	// The format of Go pre-release version e.g. 1.20rc1 doesn't follow the semver rule
+	// that requires a hyphen before the identifier "rc".
+	v := runtimeVersion
+	if strings.Contains(v, "rc") && !strings.Contains(v, "-rc") {
+		v = strings.Replace(v, "rc", "-rc", 1)
+	}
+	rtVer, err := semver.NewVersion(v)
+	if err != nil {
+		t.Fatalf("Unable to use %q as a semver.Version: %v", v, err)
+	}
+	return versionMatches(t, rtVer, inclusionConstraint)
+}
+
+func versionMatches(t *testing.T, version *semver.Version, constraint string) bool {
+	t.Helper()
+	c, err := semver.NewConstraint(constraint)
+	if err != nil {
+		t.Fatalf("Unable to use %q as a semver.Constraint: %v", constraint, err)
+	}
+	return c.Check(version)
+}
+
+func sliceContains(value string, slice []string) bool {
+	for _, v := range slice {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 func getNewVersions(runtime string) []string {

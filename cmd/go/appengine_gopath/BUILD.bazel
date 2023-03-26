@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "go",
+    version = "0.9.0",
     visibility = [
         "//builders:go_builders",
     ],
@@ -24,6 +26,7 @@ go_binary(
         "-w",
     ],
     deps = [
+        "//pkg/appengine",
         "//pkg/env",
         "//pkg/gcpbuildpack",
     ],

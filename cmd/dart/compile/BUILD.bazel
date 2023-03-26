@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "dart",
+    version = "1.0.0",
     visibility = [
         "//builders:dart_builders",
     ],
@@ -24,6 +26,7 @@ go_binary(
         "-w",
     ],
     deps = [
+        "//pkg/dart",
         "//pkg/env",
         "//pkg/gcpbuildpack",
     ],

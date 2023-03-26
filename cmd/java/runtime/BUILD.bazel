@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "java",
+    version = "0.9.1",
     visibility = [
         "//builders:java_builders",
     ],
@@ -27,7 +29,6 @@ go_binary(
         "//pkg/env",
         "//pkg/gcpbuildpack",
         "//pkg/runtime",
-        "@com_github_buildpacks_libcnb//:go_default_library",
     ],
 )
 

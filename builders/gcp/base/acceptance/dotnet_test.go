@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,52 +25,70 @@ func init() {
 }
 
 func TestAcceptanceDotNet(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
-	defer cleanup()
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
+	t.Cleanup(cleanup)
 
-	sdk := filepath.Join("/layers", dotnetRuntime, "sdk")
+	sdk := filepath.Join("/layers", dotnetSDK, "sdk")
 
 	testCases := []acceptance.Test{
 		{
 			Name:              "simple dotnet app",
-			App:               "dotnet/simple",
-			MustUse:           []string{dotnetRuntime, dotnetPublish},
+			App:               "simple",
+			MustUse:           []string{dotnetSDK, dotnetRuntime, dotnetPublish},
+			FilesMustNotExist: []string{sdk},
+			EnableCacheTest:   true,
+		},
+		{
+			Name:                       "simple dotnet 7.0 app",
+			VersionInclusionConstraint: ">=7.0.0 <8.0.0",
+			App:                        "simple_dotnet7",
+			MustUse:                    []string{dotnetSDK, dotnetRuntime, dotnetPublish},
+			FilesMustNotExist:          []string{sdk},
+		},
+		{
+			Name:                       "simple dotnet 6.0 app",
+			VersionInclusionConstraint: ">=6.0.0 <7.0.0",
+			App:                        "simple_dotnet6",
+			MustUse:                    []string{dotnetSDK, dotnetRuntime, dotnetPublish},
+			FilesMustNotExist:          []string{sdk},
+		},
+		{
+			Name: "simple dotnet app with runtime version",
+			// .NET 3.1 is not supported on Ubuntu 22.04.
+			SkipStacks:        []string{"google.22", "google.min.22", "google.gae.22"},
+			App:               "simple",
+			Path:              "/version?want=3.1.30",
+			Env:               []string{"GOOGLE_ASP_NET_CORE_VERSION=3.1.30"},
+			MustUse:           []string{dotnetSDK, dotnetRuntime, dotnetPublish},
 			FilesMustNotExist: []string{sdk},
 		},
 		{
-			Name:              "simple dotnet 6.0 app",
-			App:               "dotnet/simple_dotnet6",
-			MustUse:           []string{dotnetRuntime, dotnetPublish},
-			FilesMustNotExist: []string{sdk},
-		},
-		{
-			Name:              "simple dotnet app with runtime version",
-			App:               "dotnet/simple",
-			Path:              "/version?want=3.1.1",
-			Env:               []string{"GOOGLE_RUNTIME_VERSION=3.1.101"},
-			MustUse:           []string{dotnetRuntime, dotnetPublish},
-			FilesMustNotExist: []string{sdk},
-		},
-		{
-			Name:              "simple dotnet app with global.json",
-			App:               "dotnet/simple_with_global",
-			Path:              "/version?want=3.1.0",
-			MustUse:           []string{dotnetRuntime, dotnetPublish},
-			FilesMustNotExist: []string{sdk},
-		},
-		{
-			Name:              "simple prebuilt dotnet app",
-			App:               "dotnet/simple_prebuilt",
+			Name: "simple prebuilt dotnet app",
+			// simple_prebuilt is a dotnet 3 app.
+			VersionInclusionConstraint: "3",
+			// .NET 3.1 is not supported on Ubuntu 22.04.
+			SkipStacks:        []string{"google.22", "google.min.22", "google.gae.22"},
+			App:               "simple_prebuilt",
 			Env:               []string{"GOOGLE_ENTRYPOINT=./simple"},
 			MustUse:           []string{dotnetRuntime},
-			MustNotUse:        []string{dotnetPublish},
+			MustNotUse:        []string{dotnetSDK, dotnetPublish},
 			FilesMustNotExist: []string{sdk},
+			BOM: []acceptance.BOMEntry{
+				{
+					Name: "aspnetcore",
+					Metadata: map[string]interface{}{
+						"version": "3.1.0", // Version specified by simple_prebuilt/simple.runtimeconfig.json.
+					},
+				},
+			},
 		},
 		{
-			Name:                "Dev mode",
-			App:                 "dotnet/simple",
-			Env:                 []string{"GOOGLE_DEVMODE=1"},
-			MustUse:             []string{dotnetRuntime, dotnetPublish},
+			Name: "Dev mode",
+			// Hot reloading only works on .NET 3.1, which is not supported on Ubuntu 22.04.
+			SkipStacks:          []string{"google.22", "google.min.22", "google.gae.22"},
+			App:                 "simple",
+			Env:                 []string{"GOOGLE_DEVMODE=1", "GOOGLE_DOTNET_SDK_VERSION=3.1.x"},
+			MustUse:             []string{dotnetSDK, dotnetRuntime, dotnetPublish},
 			FilesMustExist:      []string{sdk, "/workspace/Startup.cs"},
 			MustRebuildOnChange: "/workspace/Startup.cs",
 		},
@@ -78,14 +96,14 @@ func TestAcceptanceDotNet(t *testing.T) {
 			// This is a separate test case from Dev mode above because it has a fixed runtime version.
 			// Its only purpose is to test that the metadata is set correctly.
 			Name:    "Dev mode metadata",
-			App:     "dotnet/simple",
-			Env:     []string{"GOOGLE_DEVMODE=1", "GOOGLE_RUNTIME_VERSION=3.1.409"},
-			MustUse: []string{dotnetRuntime, dotnetPublish},
+			App:     "simple_dotnet6",
+			Env:     []string{"GOOGLE_DEVMODE=1", "GOOGLE_RUNTIME_VERSION=6.0.402"},
+			MustUse: []string{dotnetSDK, dotnetRuntime, dotnetPublish},
 			BOM: []acceptance.BOMEntry{
 				{
-					Name: "sdk",
+					Name: "dotnetsdk",
 					Metadata: map[string]interface{}{
-						"version": "3.1.409",
+						"version": "6.0.402",
 					},
 				},
 				{
@@ -104,31 +122,26 @@ func TestAcceptanceDotNet(t *testing.T) {
 				},
 			},
 		},
-		{
-			Name:       "dotnet selected via GOOGLE_RUNTIME",
-			App:        "override",
-			Env:        []string{"GOOGLE_RUNTIME=dotnet"},
-			MustUse:    []string{dotnetRuntime},
-			MustNotUse: []string{nodeRuntime, pythonRuntime, goRuntime},
-		},
 	}
-	for _, tc := range testCases {
+	for _, tc := range acceptance.FilterTests(t, imageCtx, testCases) {
+		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
-			acceptance.TestApp(t, builder, tc)
+			t.Parallel()
+			acceptance.TestApp(t, imageCtx, tc)
 		})
 	}
 }
 
 func TestFailuresDotNet(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.FailureTest{
 		{
 			Name:      "bad runtime version",
-			App:       "dotnet/simple",
+			App:       "simple",
 			Env:       []string{"GOOGLE_RUNTIME_VERSION=BAD_NEWS_BEARS"},
-			MustMatch: "runtime version BAD_NEWS_BEARS does not exist",
+			MustMatch: "invalid .NET SDK version specified: improper constraint: BAD_NEWS_BEARS",
 		},
 	}
 
@@ -137,7 +150,7 @@ func TestFailuresDotNet(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestBuildFailure(t, builder, tc)
+			acceptance.TestBuildFailure(t, imageCtx, tc)
 		})
 	}
 }

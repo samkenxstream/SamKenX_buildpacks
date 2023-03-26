@@ -24,6 +24,7 @@ func TestDetect(t *testing.T) {
 	testCases := []struct {
 		name  string
 		files map[string]string
+		env   []string
 		want  int
 	}{
 		{
@@ -34,6 +35,22 @@ func TestDetect(t *testing.T) {
 			want: 0,
 		},
 		{
+			name: "py files and runtime set to python",
+			files: map[string]string{
+				"main.py": "",
+			},
+			env:  []string{"GOOGLE_RUNTIME=python"},
+			want: 0,
+		},
+		{
+			name: "py files and runtime set to php",
+			files: map[string]string{
+				"main.py": "",
+			},
+			env:  []string{"GOOGLE_RUNTIME=php"},
+			want: 100,
+		},
+		{
 			name:  "no py files",
 			files: map[string]string{},
 			want:  100,
@@ -41,7 +58,51 @@ func TestDetect(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			buildpacktest.TestDetect(t, detectFn, tc.name, tc.files, []string{}, tc.want)
+			buildpacktest.TestDetect(t, detectFn, tc.name, tc.files, tc.env, tc.want)
+		})
+	}
+}
+
+func TestParseExecPrefix(t *testing.T) {
+	testCases := []struct {
+		sysConfig string
+		want      string
+		wantErr   bool
+	}{
+		{
+			sysConfig: "",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			sysConfig: `installed_base = "/layers/google.python.runtime/python"`,
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			sysConfig: `
+exec_prefix = "/opt/python3.11"
+installed_base = "/layers/google.python.runtime/python"
+			`,
+			want: "/opt/python3.11",
+		},
+		{
+			sysConfig: `
+exec_prefix = "/opt/python3.9"
+installed_base = "/layers/google.python.runtime/python"
+			`,
+			want: "/opt/python3.9",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.sysConfig, func(t *testing.T) {
+			got, err := parseExecPrefix(tc.sysConfig)
+			if (err == nil) == tc.wantErr {
+				t.Errorf("parseExecPrefix() got err: %v, want %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("parseExecPrefix(%q) = %q, want %q", tc.sysConfig, got, tc.want)
+			}
 		})
 	}
 }

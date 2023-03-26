@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,18 +24,27 @@ func init() {
 }
 
 func TestAcceptanceNodeJs(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.Test{
 		{
-			Name:    "simple application",
-			App:     "nodejs/simple",
-			MustUse: []string{nodeRuntime, nodeNPM},
+			Name:            "simple application",
+			App:             "simple",
+			MustUse:         []string{nodeRuntime, nodeNPM},
+			EnableCacheTest: true,
+		},
+		{
+			// Tests a specific versions of Node.js available on dl.google.com.
+			Name:    "runtime version 16.17.1",
+			App:     "simple",
+			Path:    "/version?want=16.17.1",
+			Env:     []string{"GOOGLE_NODEJS_VERSION=16.17.1"},
+			MustUse: []string{nodeRuntime},
 		},
 		{
 			Name:                "Dev mode",
-			App:                 "nodejs/simple",
+			App:                 "simple",
 			Env:                 []string{"GOOGLE_DEVMODE=1"},
 			MustUse:             []string{nodeRuntime, nodeNPM},
 			FilesMustExist:      []string{"/workspace/server.js"},
@@ -45,14 +54,14 @@ func TestAcceptanceNodeJs(t *testing.T) {
 			// This is a separate test case from Dev mode above because it has a fixed runtime version.
 			// Its only purpose is to test that the metadata is set correctly.
 			Name:    "Dev mode metadata",
-			App:     "nodejs/simple",
-			Env:     []string{"GOOGLE_DEVMODE=1", "GOOGLE_RUNTIME_VERSION=14.17.0"},
+			App:     "simple",
+			Env:     []string{"GOOGLE_DEVMODE=1", "GOOGLE_RUNTIME_VERSION=14.19.3"},
 			MustUse: []string{nodeRuntime, nodeNPM},
 			BOM: []acceptance.BOMEntry{
 				{
-					Name: "node",
+					Name: "nodejs",
 					Metadata: map[string]interface{}{
-						"version": "14.17.0",
+						"version": "14.19.3",
 					},
 				},
 				{
@@ -72,89 +81,77 @@ func TestAcceptanceNodeJs(t *testing.T) {
 		},
 		{
 			Name:    "simple application (custom entrypoint)",
-			App:     "nodejs/custom_entrypoint",
+			App:     "custom_entrypoint",
 			Env:     []string{"GOOGLE_ENTRYPOINT=node custom.js"},
 			MustUse: []string{nodeRuntime, nodeNPM, entrypoint},
 		},
 		{
 			Name:       "yarn",
-			App:        "nodejs/yarn",
+			App:        "yarn",
 			MustUse:    []string{nodeRuntime, nodeYarn},
 			MustNotUse: []string{nodeNPM},
 		},
 		{
 			Name:       "yarn (Dev Mode)",
-			App:        "nodejs/yarn",
+			App:        "yarn",
 			Env:        []string{"GOOGLE_DEVMODE=1"},
 			MustUse:    []string{nodeRuntime, nodeYarn},
 			MustNotUse: []string{nodeNPM},
 		},
 		{
-			Name:    "runtime version with npm install",
-			App:     "nodejs/simple",
-			Path:    "/version?want=12.13.0",
-			Env:     []string{"GOOGLE_RUNTIME_VERSION=12.13.0"},
-			MustUse: []string{nodeRuntime, nodeNPM},
-		},
-		{
 			Name:    "runtime version with npm ci",
-			App:     "nodejs/simple",
-			Path:    "/version?want=12.13.1",
-			Env:     []string{"GOOGLE_RUNTIME_VERSION=12.13.1"},
+			App:     "simple",
+			Path:    "/version?want=16.18.1",
+			Env:     []string{"GOOGLE_RUNTIME_VERSION=16.18.1"},
 			MustUse: []string{nodeRuntime, nodeNPM},
 		},
 		{
 			Name:       "without package.json",
-			App:        "nodejs/no_package",
+			App:        "no_package",
 			Env:        []string{"GOOGLE_ENTRYPOINT=node server.js"},
 			MustUse:    []string{nodeRuntime},
 			MustNotUse: []string{nodeNPM, nodeYarn},
 		},
 		{
-			Name:       "selected via GOOGLE_RUNTIME",
-			App:        "override",
-			Env:        []string{"GOOGLE_RUNTIME=nodejs"},
-			MustUse:    []string{nodeRuntime},
-			MustNotUse: []string{goRuntime, javaRuntime, pythonRuntime},
+			Name: "NPM version specified",
+			// npm@8 requires nodejs@12+
+			VersionInclusionConstraint: ">= 12.0.0",
+			App:                        "npm_version_specified",
+			MustOutput:                 []string{"npm --version\n\n8.3.1"},
+			Path:                       "/version?want=8.3.1",
 		},
 		{
-			Name:          "NPM version specified",
-			App:           "nodejs/npm_version_specified",
-			MustMatch:     "hello, world",
-			MustOutput:    []string{"npm --version\n\n7.24.1"},
-			SkipCacheTest: true,
+			Name: "old NPM version specified",
+			// npm@5 requires nodejs@8
+			VersionInclusionConstraint: "8",
+			App:                        "old_npm_version_specified",
+			Path:                       "/version?want=5.5.1",
+			MustUse:                    []string{nodeRuntime, nodeNPM},
+			MustOutput:                 []string{"npm --version\n\n5.5.1"},
+			// nodejs@8 is not available on Ubuntu 22.04
+			SkipStacks: []string{"google.22", "google.min.22", "google.gae.22"},
 		},
 	}
-	// Tests for specific versions of Node.js available on dl.google.com.
-	for _, v := range acceptance.RuntimeVersions("nodejs", "8.17.0") {
-		testCases = append(testCases, acceptance.Test{
-			Name:    "runtime version " + v,
-			App:     "nodejs/simple",
-			Path:    "/version?want=" + v,
-			Env:     []string{"GOOGLE_NODEJS_VERSION=" + v},
-			MustUse: []string{nodeRuntime},
-		})
-	}
-	for _, tc := range testCases {
+	for _, tc := range acceptance.FilterTests(t, imageCtx, testCases) {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestApp(t, builder, tc)
+			acceptance.TestApp(t, imageCtx, tc)
 		})
 	}
 }
 
 func TestFailuresNodeJs(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.FailureTest{
 		{
 			Name:      "bad runtime version",
-			App:       "nodejs/simple",
+			App:       "simple",
 			Env:       []string{"GOOGLE_RUNTIME_VERSION=BAD_NEWS_BEARS"},
-			MustMatch: "Runtime version BAD_NEWS_BEARS does not exist",
+			MustMatch: "invalid Node.js version specified",
 		},
 	}
 
@@ -163,7 +160,7 @@ func TestFailuresNodeJs(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 
-			acceptance.TestBuildFailure(t, builder, tc)
+			acceptance.TestBuildFailure(t, imageCtx, tc)
 		})
 	}
 }

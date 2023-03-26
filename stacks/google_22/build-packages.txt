@@ -1,0 +1,14 @@
+build-essential
+ca-certificates
+curl
+git
+libexpat1
+libicu70
+libyaml-0-2
+locales
+openssl
+tar
+tzdata
+unzip
+xz-utils
+zip

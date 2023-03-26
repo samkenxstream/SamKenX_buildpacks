@@ -20,6 +20,12 @@ import (
 	"fmt"
 
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/nodejs"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/ruby"
+)
+
+const (
+	yarnLayer = "yarn"
 )
 
 func main() {
@@ -34,7 +40,7 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 	if !railsExists {
 		return gcp.OptOutFileNotFound("bin/rails"), nil
 	}
-	needsPrecompile, err := needsRailsAssetPrecompile(ctx)
+	needsPrecompile, err := ruby.NeedsRailsAssetPrecompile(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -44,47 +50,16 @@ func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
 	return gcp.OptIn("found Rails assets to precompile"), nil
 }
 
-func needsRailsAssetPrecompile(ctx *gcp.Context) (bool, error) {
-	assetsExists, err := ctx.FileExists("app", "assets")
-	if err != nil {
-		return false, err
-	}
-	if !assetsExists {
-		return false, nil
-	}
-
-	manifestExists, err := ctx.FileExists("public", "assets", "manifest.yml")
-	if err != nil {
-		return false, err
-	}
-	if manifestExists {
-		return false, nil
-	}
-
-	matches, err := ctx.Glob("public/assets/manifest-*.json")
-	if err != nil {
-		return false, fmt.Errorf("finding manifets: %w", err)
-	}
-	if matches != nil {
-		return false, nil
-	}
-
-	matches, err = ctx.Glob("public/assets/.sprockets-manifest-*.json")
-	if err != nil {
-		return false, fmt.Errorf("finding sprockets-manifets: %w", err)
-	}
-	if matches != nil {
-		return false, nil
-	}
-
-	return true, nil
-}
-
 func buildFn(ctx *gcp.Context) error {
 	ctx.Logf("Running Rails asset precompilation")
 
+	// Install Yarn as it is needed for asset precompilation.
+	if err := installYarn(ctx); err != nil {
+		return fmt.Errorf("installing Yarn: %w", err)
+	}
+
 	// It is common practise in Ruby asset precompilation to ignore non-zero exit codes.
-	result, err := ctx.ExecWithErr([]string{"bundle", "exec", "ruby", "bin/rails", "assets:precompile"},
+	result, err := ctx.Exec([]string{"bundle", "exec", "ruby", "bin/rails", "assets:precompile"},
 		gcp.WithEnv("RAILS_ENV=production", "MALLOC_ARENA_MAX=2", "RAILS_LOG_TO_STDOUT=true", "LANG=C.utf8"), gcp.WithUserAttribution)
 	if err != nil && result != nil && result.ExitCode != 0 {
 		ctx.Logf("WARNING: Asset precompilation returned non-zero exit code %d. Ignoring.", result.ExitCode)
@@ -98,4 +73,16 @@ func buildFn(ctx *gcp.Context) error {
 	}
 
 	return nil
+}
+
+func installYarn(ctx *gcp.Context) error {
+	pjs, err := nodejs.ReadPackageJSONIfExists(ctx.ApplicationRoot())
+	if err != nil {
+		return err
+	}
+	yrl, err := ctx.Layer(yarnLayer, gcp.BuildLayer, gcp.CacheLayer)
+	if err != nil {
+		return fmt.Errorf("creating %v layer: %w", yarnLayer, err)
+	}
+	return nodejs.InstallYarnLayer(ctx, yrl, pjs)
 }

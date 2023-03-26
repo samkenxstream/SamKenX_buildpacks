@@ -45,11 +45,11 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	pomExists, err := ctx.FileExists("pom.xml")
+	pomPath, err := pomFilePath(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if pomExists {
+	if pomPath != "" {
 		return gcp.OptInFileFound("pom.xml"), nil
 	}
 	extXMLExists, err := ctx.FileExists(".mvn/extensions.xml")
@@ -87,41 +87,35 @@ func buildFn(ctx *gcp.Context) error {
 		return err
 	}
 
-	var mvn string
-	mvnwExists, err := ctx.FileExists("mvnw")
+	mvn, err := provisionOrDetectMaven(ctx)
 	if err != nil {
 		return err
 	}
-	if mvnwExists {
-		// With CRLF endings, the "\r" gets seen as part of the shebang target, which doesn't exist.
-		if err := ensureUnixLineEndings(ctx, "mvnw"); err != nil {
-			return fmt.Errorf("ensuring unix newline characters: %w", err)
-		}
-		mvn = "./mvnw"
-	} else if mvnInstalled(ctx) {
-		mvn = "mvn"
-	} else {
-		var err error
-		mvn, err = installMaven(ctx)
-		if err != nil {
-			return fmt.Errorf("installing Maven: %w", err)
-		}
-	}
 
 	command := []string{mvn, "clean", "package", "--batch-mode", "-DskipTests", "-Dhttp.keepAlive=false"}
+
+	pomPath, err := pomFilePath(ctx)
+	if err != nil {
+		return err
+	}
+	if pomPath != "" {
+		command = append(command, fmt.Sprintf("-f=%s", pomPath))
+	}
 
 	if buildArgs := os.Getenv(env.BuildArgs); buildArgs != "" {
 		if strings.Contains(buildArgs, "maven.repo.local") {
 			ctx.Warnf("Detected maven.repo.local property set in GOOGLE_BUILD_ARGS. Maven caching may not work properly.")
 		}
-		command = append(command, buildArgs)
+		command = append(command, strings.Fields(buildArgs)...)
 	}
 
 	if !ctx.Debug() && !devmode.Enabled(ctx) {
 		command = append(command, "--quiet")
 	}
 
-	ctx.Exec(command, gcp.WithStdoutTail, gcp.WithUserAttribution)
+	if _, err := ctx.Exec(command, gcp.WithStdoutTail, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 
 	// Store the build steps in a script to be run on each file change.
 	if devmode.Enabled(ctx) {
@@ -129,6 +123,32 @@ func buildFn(ctx *gcp.Context) error {
 	}
 
 	return nil
+}
+
+func provisionOrDetectMaven(ctx *gcp.Context) (string, error) {
+	mvnwExists, err := ctx.FileExists("mvnw")
+	if err != nil {
+		return "", err
+	}
+	if mvnwExists {
+		// With CRLF endings, the "\r" gets seen as part of the shebang target, which doesn't exist.
+		if err := ensureUnixLineEndings(ctx, "mvnw"); err != nil {
+			return "", fmt.Errorf("ensuring unix newline characters: %w", err)
+		}
+		return "./mvnw", nil
+	}
+	mvnInstalled, err := mvnInstalled(ctx)
+	if err != nil {
+		return "", err
+	}
+	if mvnInstalled {
+		return "mvn", nil
+	}
+	mvn, err := installMaven(ctx)
+	if err != nil {
+		return "", fmt.Errorf("installing Maven: %w", err)
+	}
+	return mvn, nil
 }
 
 // addJvmConfig is a workaround for https://github.com/google/guice/issues/1133, an "illegal reflective access" warning.
@@ -160,9 +180,12 @@ func addJvmConfig(ctx *gcp.Context) error {
 	return nil
 }
 
-func mvnInstalled(ctx *gcp.Context) bool {
-	result := ctx.Exec([]string{"bash", "-c", "command -v mvn || true"})
-	return result.Stdout != ""
+func mvnInstalled(ctx *gcp.Context) (bool, error) {
+	result, err := ctx.Exec([]string{"bash", "-c", "command -v mvn || true"})
+	if err != nil {
+		return false, err
+	}
+	return result.Stdout != "", nil
 }
 
 // installMaven installs Maven and returns the path of the mvn binary
@@ -195,7 +218,9 @@ func installMaven(ctx *gcp.Context) (string, error) {
 		return "", gcp.UserErrorf("Maven version %s does not exist at %s (status %d).", mavenVersion, archiveURL, code)
 	}
 	command := fmt.Sprintf("curl --fail --show-error --silent --location --retry 3 %s | tar xz --directory %s --strip-components=1", archiveURL, mvnl.Path)
-	ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"bash", "-c", command}, gcp.WithUserAttribution); err != nil {
+		return "", err
+	}
 
 	ctx.SetMetadata(mvnl, versionKey, mavenVersion)
 	return filepath.Join(mvnl.Path, "bin", "mvn"), nil
@@ -223,4 +248,17 @@ func ensureUnixLineEndings(ctx *gcp.Context, file ...string) error {
 		return err
 	}
 	return nil
+}
+
+func pomFilePath(ctx *gcp.Context) (string, error) {
+	buildable := os.Getenv(env.Buildable)
+	pomPath := filepath.Join(buildable, "pom.xml")
+	pomExists, err := ctx.FileExists(pomPath)
+	if err != nil {
+		return "", err
+	}
+	if pomExists {
+		return pomPath, nil
+	}
+	return "", nil
 }

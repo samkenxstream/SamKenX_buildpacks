@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,7 @@ func init() {
 }
 
 func TestAcceptance(t *testing.T) {
-	builder, cleanup := acceptance.CreateBuilder(t)
+	imageCtx, cleanup := acceptance.ProvisionImages(t)
 	t.Cleanup(cleanup)
 
 	testCases := []acceptance.Test{
@@ -57,20 +57,18 @@ func TestAcceptance(t *testing.T) {
 		},
 	}
 
-	for _, rubyVersion := range acceptance.RuntimeVersions("ruby", "2.7.5") {
-		for _, tc := range testCases {
-			tc := tc
-			t.Run(tc.Name, func(t *testing.T) {
-				t.Parallel()
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
 
-				tc.Path = "/testFunction"
-				tc.Env = append(tc.Env,
-					"GOOGLE_RUNTIME_VERSION="+rubyVersion,
-					"GOOGLE_ENTRYPOINT=bundle exec functions-framework-ruby --target testFunction",
-				)
+			tc.Path = "/testFunction"
+			tc.Env = append(tc.Env,
+				"GOOGLE_RUNTIME_VERSION=3.1.*",
+				"GOOGLE_ENTRYPOINT=bundle exec functions-framework-ruby --target testFunction",
+			)
 
-				acceptance.TestApp(t, builder, tc)
-			})
-		}
+			acceptance.TestApp(t, imageCtx, tc)
+		})
 	}
 }

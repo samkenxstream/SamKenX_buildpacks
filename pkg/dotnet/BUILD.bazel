@@ -12,7 +12,6 @@ go_library(
         "//cmd/dotnet:__subpackages__",
     ],
     deps = [
-        "//pkg/dotnet/release/client",
         "//pkg/env",
         "//pkg/gcpbuildpack",
     ],
@@ -26,7 +25,11 @@ go_test(
     embed = [":dotnet"],
     rundir = ".",
     deps = [
+        "//pkg/env",
         "//pkg/gcpbuildpack",
         "//pkg/testdata",
+        "@com_github_buildpacks_libcnb//:go_default_library",
+        "@com_github_google_go-cmp//cmp:go_default_library",
+        "@com_github_google_go-cmp//cmp:go_default_library/cmpopts",
     ],
 )

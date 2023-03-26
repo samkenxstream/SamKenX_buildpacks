@@ -37,6 +37,9 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if !nodejs.IsNodeJS8Runtime() {
+		return gcp.OptOut("Only compatible with nodejs8"), nil
+	}
 	if _, ok := os.LookupEnv(env.FunctionTarget); ok {
 		return gcp.OptInEnvSet(env.FunctionTarget), nil
 	}
@@ -81,7 +84,9 @@ func buildFn(ctx *gcp.Context) error {
 	}
 
 	// Syntax check the function code without executing to prevent run-time errors.
-	ctx.Exec([]string{"node", "--check", fnFile}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"node", "--check", fnFile}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 
 	l, err := ctx.Layer(layerName, gcp.BuildLayer, gcp.CacheLayer, gcp.LaunchLayer)
 	if err != nil {
@@ -141,25 +146,24 @@ func installLegacyWorker(ctx *gcp.Context, l *libcnb.Layer) error {
 	pjs := filepath.Join(cvt, "package.json")
 	wjs := filepath.Join(cvt, "worker.js")
 
-	cached, err := nodejs.CheckCache(ctx, l, cache.WithStrings(nodejs.EnvProduction), cache.WithFiles(pjs, wjs))
+	cached, err := nodejs.CheckOrClearCache(ctx, l, cache.WithStrings(nodejs.EnvProduction), cache.WithFiles(pjs, wjs))
 	if err != nil {
 		return fmt.Errorf("checking cache: %w", err)
 	}
 	if cached {
-		ctx.CacheHit(layerName)
 		return nil
 	}
+	ctx.Logf("Installing worker dependencies.")
 	installCmd, err := nodejs.NPMInstallCommand(ctx)
 	if err != nil {
 		return err
 	}
 
-	ctx.CacheMiss(layerName)
-	if err := ctx.ClearLayer(l); err != nil {
-		return fmt.Errorf("clearing layer %q: %w", l.Name, err)
+	if _, err := ctx.Exec([]string{"cp", "-t", l.Path, pjs, wjs}, gcp.WithUserTimingAttribution); err != nil {
+		return err
 	}
-
-	ctx.Exec([]string{"cp", "-t", l.Path, pjs, wjs}, gcp.WithUserTimingAttribution)
-	ctx.Exec([]string{"npm", installCmd, "--quiet", "--production", "--prefix", l.Path}, gcp.WithUserAttribution)
+	if _, err := ctx.Exec([]string{"npm", installCmd, "--quiet", "--production", "--prefix", l.Path}, gcp.WithUserAttribution); err != nil {
+		return err
+	}
 	return nil
 }

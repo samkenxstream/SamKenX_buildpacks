@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/appengine"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/cache"
@@ -41,6 +42,44 @@ const (
 	dependencyHashKey = "dependency_hash"
 
 	composerVersionKey = "php"
+
+	// PHPIni is the content of the php.ini config file
+	PHPIni = `
+; Copyright 2022 Google Inc.
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+
+expose_php = Off
+memory_limit = -1
+max_execution_time = 0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Error handling and logging, based on php.ini-production. ;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+display_errors = Off
+display_startup_errors = Off
+log_errors = On
+log_errors_max_len = 0
+ignore_repeated_errors = Off
+ignore_repeated_source = Off
+html_errors = Off
+zend.assertions = -1
+;; Enable maximum file sizes up to Front-End limits.
+upload_max_filesize = 32M
+post_max_size = 32M
+`
 )
 
 type composerScriptsJSON struct {
@@ -78,57 +117,52 @@ func ReadComposerJSON(dir string) (*ComposerJSON, error) {
 }
 
 // version returns the installed version of PHP.
-func version(ctx *gcp.Context) string {
-	result := ctx.Exec([]string{"php", "-r", "echo PHP_VERSION;"})
-	return result.Stdout
+func version(ctx *gcp.Context) (string, error) {
+	result, err := ctx.Exec([]string{"php", "-r", "echo PHP_VERSION;"})
+	if err != nil {
+		return "", err
+	}
+	return result.Stdout, nil
 }
 
-// checkCache checks whether cached dependencies exist and match.
-func checkCache(ctx *gcp.Context, l *libcnb.Layer, opts ...cache.Option) (bool, error) {
-	currentPHPVersion := version(ctx)
-	opts = append(opts, cache.WithStrings(currentPHPVersion))
-	currentDependencyHash, err := cache.Hash(ctx, opts...)
+// composerDependencyHash computes a hash of composer metadata files that is used to check whether
+// or not cached PHP dependencies in a layer should be re-installed.
+func composerDependencyHash(ctx *gcp.Context) (string, error) {
+	currentPHPVersion, err := version(ctx)
 	if err != nil {
-		return false, fmt.Errorf("computing dependency hash: %v", err)
+		return "", err
 	}
-
-	// Perform install, skipping if the dependency hash matches existing metadata.
-	metaDependencyHash := ctx.GetMetadata(l, dependencyHashKey)
-	ctx.Debugf("Current dependency hash: %q", currentDependencyHash)
-	ctx.Debugf("  Cache dependency hash: %q", metaDependencyHash)
-	if currentDependencyHash == metaDependencyHash {
-		ctx.Logf("Dependencies cache hit, skipping installation.")
-		return true, nil
+	currentDependencyHash, err := cache.Hash(ctx, cache.WithFiles(composerJSON, composerLock), cache.WithStrings(currentPHPVersion))
+	if err != nil {
+		return "", fmt.Errorf("computing dependency hash: %v", err)
 	}
-
-	if metaDependencyHash == "" {
-		ctx.Debugf("No metadata found from a previous build, skipping cache.")
-	}
-	ctx.Logf("Installing application dependencies.")
-
-	// Update the layer metadata.
-	ctx.SetMetadata(l, dependencyHashKey, currentDependencyHash)
-	ctx.SetMetadata(l, phpVersionKey, currentPHPVersion)
-
-	return false, nil
+	return currentDependencyHash, nil
 }
 
 // composerInstall runs `composer install` with the given flags.
-func composerInstall(ctx *gcp.Context, flags []string) {
+func composerInstall(ctx *gcp.Context, flags []string) error {
 	cmd := append([]string{"composer", "install"}, flags...)
-	ctx.Exec(cmd, gcp.WithUserAttribution)
+	if _, err := ctx.Exec(cmd, gcp.WithUserAttribution); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ComposerInstall runs `composer install`, using the cache iff a lock file is present.
 // It creates a layer, so it returns the layer so that the caller may further modify it
 // if they desire.
 func ComposerInstall(ctx *gcp.Context, cacheTag string) (*libcnb.Layer, error) {
-	// We don't install dev dependencies (i.e. we pass --no-dev to composer) because doing so has caused
-	// problems for customers in the past. For more information see these links:
-	//   https://github.com/GoogleCloudPlatform/php-docs-samples/issues/736
-	//   https://github.com/GoogleCloudPlatform/runtimes-common/pull/763
-	//   https://github.com/GoogleCloudPlatform/runtimes-common/commit/6c4970f609d80f9436ac58ae272cfcc6bcd57143
-	flags := []string{"--no-dev", "--no-progress", "--no-suggest", "--no-interaction", "--optimize-autoloader"}
+	var flags []string
+	if composerArgs := os.Getenv(env.ComposerArgsEnv); composerArgs != "" {
+		flags = strings.Split(composerArgs, " ")
+	} else {
+		// We don't install dev dependencies (i.e. we pass --no-dev to composer) because doing so has caused
+		// problems for customers in the past. For more information see these links:
+		//   https://github.com/GoogleCloudPlatform/php-docs-samples/issues/736
+		//   https://github.com/GoogleCloudPlatform/runtimes-common/pull/763
+		//   https://github.com/GoogleCloudPlatform/runtimes-common/commit/6c4970f609d80f9436ac58ae272cfcc6bcd57143
+		flags = []string{"--no-dev", "--no-progress", "--no-interaction", "--optimize-autoloader"}
+	}
 
 	if err := ctx.RemoveAll(Vendor); err != nil {
 		return nil, err
@@ -148,32 +182,54 @@ func ComposerInstall(ctx *gcp.Context, cacheTag string) (*libcnb.Layer, error) {
 	// to newer versions in the future.
 	if !composerLockExists {
 		ctx.Logf("*** Improve build performance by generating and committing %s.", composerLock)
-		composerInstall(ctx, flags)
+		if err := composerInstall(ctx, flags); err != nil {
+			return nil, err
+		}
 		return l, nil
 	}
 
-	cached, err := checkCache(ctx, l, cache.WithFiles(composerJSON, composerLock))
+	currentDependencyHash, err := composerDependencyHash(ctx)
 	if err != nil {
 		return l, fmt.Errorf("checking cache: %w", err)
 	}
-	if cached {
+
+	// Perform install, skipping if the dependency hash matches existing metadata.
+	metaDependencyHash := ctx.GetMetadata(l, dependencyHashKey)
+	ctx.Debugf("Current dependency hash: %q", currentDependencyHash)
+	ctx.Debugf("  Cache dependency hash: %q", metaDependencyHash)
+
+	if currentDependencyHash == metaDependencyHash {
+		ctx.Logf("Dependencies cache hit, skipping installation.")
 		ctx.CacheHit(cacheTag)
 
 		// PHP expects the vendor/ directory to be in the application directory.
-		ctx.Exec([]string{"cp", "--archive", layerVendor, Vendor}, gcp.WithUserTimingAttribution)
+		if _, err := ctx.Exec([]string{"cp", "--archive", layerVendor, Vendor}, gcp.WithUserTimingAttribution); err != nil {
+			return nil, err
+		}
 	} else {
 		ctx.CacheMiss(cacheTag)
+		if metaDependencyHash == "" {
+			ctx.Debugf("No metadata found from a previous build, skipping cache.")
+		}
+		ctx.Logf("Installing application dependencies.")
 		// Clear layer so we don't end up with outdated dependencies (e.g. something was removed from composer.json).
 		if err := ctx.ClearLayer(l); err != nil {
 			return nil, fmt.Errorf("clearing layer %q: %w", l.Name, err)
 		}
-		composerInstall(ctx, flags)
+		if err := composerInstall(ctx, flags); err != nil {
+			return nil, err
+		}
+
+		// Update the layer metadata.
+		ctx.SetMetadata(l, dependencyHashKey, currentDependencyHash)
 
 		// Ensure vendor exists even if no dependencies were installed.
 		if err := ctx.MkdirAll(Vendor, 0755); err != nil {
 			return nil, err
 		}
-		ctx.Exec([]string{"cp", "--archive", Vendor, layerVendor}, gcp.WithUserTimingAttribution)
+		if _, err := ctx.Exec([]string{"cp", "--archive", Vendor, layerVendor}, gcp.WithUserTimingAttribution); err != nil {
+			return nil, err
+		}
 	}
 
 	return l, nil
@@ -182,9 +238,12 @@ func ComposerInstall(ctx *gcp.Context, cacheTag string) (*libcnb.Layer, error) {
 // ComposerRequire runs `composer require` with the given packages. It expects packages to
 // be specified as `composer require` would expect them on the command line, for example
 // "myorg/mypackage:^0.7". It does no caching.
-func ComposerRequire(ctx *gcp.Context, packages []string) {
-	cmd := append([]string{"composer", "require", "--no-progress", "--no-suggest", "--no-interaction"}, packages...)
-	ctx.Exec(cmd, gcp.WithUserAttribution)
+func ComposerRequire(ctx *gcp.Context, packages []string) error {
+	cmd := append([]string{"composer", "require", "--no-progress", "--no-interaction"}, packages...)
+	if _, err := ctx.Exec(cmd, gcp.WithUserAttribution); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ExtractVersion extracts the php version from the environment, composer.json.

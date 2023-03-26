@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/appengine"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/appstart"
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/golang"
 )
@@ -30,7 +31,10 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
-	return gcp.OptInAlways(), nil
+	if env.IsGAE() {
+		return appengine.OptInTargetPlatformGAE(), nil
+	}
+	return appengine.OptOutTargetPlatformNotGAE(), nil
 }
 
 func buildFn(ctx *gcp.Context) error {
@@ -46,13 +50,21 @@ func validateAppEngineAPIs(ctx *gcp.Context) error {
 		return err
 	}
 
-	if !supportsApis && appEngineInDeps(directDeps(ctx)) {
+	dirDeps, err := directDeps(ctx)
+	if err != nil {
+		return err
+	}
+	if !supportsApis && appEngineInDeps(dirDeps) {
 		// TODO(b/179431689) Change to error.
 		ctx.Warnf(appengine.DepWarning)
 		return nil
 	}
 
-	usingAppEngine := appEngineInDeps(allDeps(ctx))
+	deps, err := allDeps(ctx)
+	if err != nil {
+		return err
+	}
+	usingAppEngine := appEngineInDeps(deps)
 	if supportsApis && !usingAppEngine {
 		ctx.Warnf(appengine.UnusedAPIWarning)
 	}
@@ -78,14 +90,18 @@ func appEngineInDeps(deps []string) bool {
 	return false
 }
 
-func allDeps(ctx *gcp.Context) []string {
-	result := ctx.Exec([]string{"go", "list", "-f", `{{join .Deps "\n"}}`, "./..."}, gcp.WithUserAttribution)
-
-	return strings.Fields(result.Stdout)
+func allDeps(ctx *gcp.Context) ([]string, error) {
+	result, err := ctx.Exec([]string{"go", "list", "-f", `{{join .Deps "\n"}}`, "./..."}, gcp.WithUserAttribution)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(result.Stdout), nil
 }
 
-func directDeps(ctx *gcp.Context) []string {
-	result := ctx.Exec([]string{"go", "list", "-f", `{{join .Imports "\n" }}`, "./..."}, gcp.WithUserAttribution)
-
-	return strings.Fields(result.Stdout)
+func directDeps(ctx *gcp.Context) ([]string, error) {
+	result, err := ctx.Exec([]string{"go", "list", "-f", `{{join .Imports "\n" }}`, "./..."}, gcp.WithUserAttribution)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(result.Stdout), nil
 }

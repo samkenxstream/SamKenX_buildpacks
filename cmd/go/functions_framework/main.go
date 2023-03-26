@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -67,6 +68,9 @@ func main() {
 }
 
 func detectFn(ctx *gcp.Context) (gcp.DetectResult, error) {
+	if golang.IsGo111Runtime() {
+		return gcp.OptOut("Incompatible with go111"), nil
+	}
 	if _, ok := os.LookupEnv(env.FunctionTarget); ok {
 		return gcp.OptInEnvSet(env.FunctionTarget), nil
 	}
@@ -78,7 +82,9 @@ func buildFn(ctx *gcp.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating %v layer: %w", layerName, err)
 	}
-	ctx.SetFunctionsEnvVars(l)
+	if err := ctx.SetFunctionsEnvVars(l); err != nil {
+		return err
+	}
 	ctx.AddWebProcess([]string{golang.OutBin})
 
 	fnTarget := os.Getenv(env.FunctionTarget)
@@ -170,18 +176,32 @@ func createMainGoMod(ctx *gcp.Context, fn fnInfo) error {
 	}
 	fn.Package = fnPackage
 
-	ctx.Exec([]string{"go", "mod", "init", appModule})
-	ctx.Exec([]string{"go", "mod", "edit", "-require", fmt.Sprintf("%s@v0.0.0", fnMod)})
-	ctx.Exec([]string{"go", "mod", "edit", "-replace", fmt.Sprintf("%s@v0.0.0=%s", fnMod, fn.Source)})
+	modVersion, err := parseModuleVersion(fnMod)
+	if err != nil {
+		return err
+	}
 
+	if modVersion == "" {
+		modVersion = "v0"
+	}
+
+	if _, err := ctx.Exec([]string{"go", "mod", "init", appModule}); err != nil {
+		return err
+	}
+	if _, err := ctx.Exec([]string{"go", "mod", "edit", "-require", fmt.Sprintf("%s@%s", fnMod, modVersion)}); err != nil {
+		return err
+	}
+	if _, err := ctx.Exec([]string{"go", "mod", "edit", "-replace", fmt.Sprintf("%s=%s", fnMod, fn.Source)}); err != nil {
+		return err
+	}
 	// If the framework is not present in the function's go.mod, we require the current version.
 	version, err := frameworkSpecifiedVersion(ctx, fn.Source)
 	if err != nil {
 		return fmt.Errorf("checking for functions framework dependency in go.mod: %w", err)
 	}
 	if version == "" {
-		if _, err := golang.ExecWithGoproxyFallback(ctx, []string{"go", "get", fmt.Sprintf("%s@%s", functionsFrameworkModule, functionsFrameworkVersion)}, gcp.WithUserAttribution); err != nil {
-			return fmt.Errorf("running go get: %w", err)
+		if _, err := ctx.Exec([]string{"go", "mod", "edit", "-require", fmt.Sprintf("%s@%s", functionsFrameworkModule, functionsFrameworkVersion)}); err != nil {
+			return err
 		}
 		version = functionsFrameworkVersion
 	}
@@ -195,9 +215,31 @@ func createMainGoMod(ctx *gcp.Context, fn fnInfo) error {
 	// the framework, in which case we want to import that version. For that reason we cannot
 	// include a pre-generated go.sum file.
 	if _, err := golang.ExecWithGoproxyFallback(ctx, []string{"go", "mod", "tidy"}, gcp.WithUserAttribution); err != nil {
-		return fmt.Errorf("running go mod tiny: %w", err)
+		return fmt.Errorf("running go mod tidy: %w", err)
 	}
 	return nil
+}
+
+// parseModuleVersion parses the major version from the Go module name.
+// If the module does not specify a major version, empty string is returned.
+// "example.com/fn/v2" returns ("v2", nil)
+// "example.com/fn" returns ("", nil)
+func parseModuleVersion(module string) (string, error) {
+	r := regexp.MustCompile(`\/(v\d+)$`)
+	m := r.FindStringSubmatch(module)
+	if m == nil {
+		return "", nil
+	}
+
+	// The first index is the full match, the second index is the submatch of
+	// the group captured by the `()` in the regular expression.
+	// There should be at most one match because the regular expression is anchored
+	// to match only the end of the string `$`.
+	if len(m) != 2 {
+		return "", fmt.Errorf("unexpected result parsing module version, module name: %q, regexp matches: %v", module, m)
+	}
+
+	return m[1], nil
 }
 
 func createMainGoModVendored(ctx *gcp.Context, fn fnInfo) error {
@@ -210,18 +252,24 @@ func createMainGoModVendored(ctx *gcp.Context, fn fnInfo) error {
 		return err
 	}
 
-	fnMod, fnPackage, err := moduleAndPackageNames(ctx, fn)
+	_, fnPackage, err := moduleAndPackageNames(ctx, fn)
 	if err != nil {
 		return fmt.Errorf("extracting module and package names: %w", err)
 	}
 	fn.Package = fnPackage
 
-	// The function must declare functions framework as a dependency.
+	fnFrameworkVendoredPathExists, err := ctx.FileExists(fn.Source, "vendor", functionsFrameworkPackage)
+	if err != nil {
+		return err
+	}
+
 	version, err := frameworkSpecifiedVersion(ctx, fn.Source)
 	if err != nil {
 		return fmt.Errorf("checking for functions framework dependency in go.mod: %w", err)
 	}
-	if version == "" {
+
+	// The function must declare functions framework as a dependency.
+	if version == "" || !fnFrameworkVendoredPathExists {
 		// Vendored dependencies must include the functions framework. Modifying vendored dependencies
 		// and adding the framework ourselves by merging two vendor directories is brittle and likely
 		// to cause conflicts among the function's and the framework's dependencies.
@@ -232,8 +280,6 @@ func createMainGoModVendored(ctx *gcp.Context, fn fnInfo) error {
 	if err := ctx.MkdirAll(appVendorDir, 0755); err != nil {
 		return err
 	}
-	ctx.Exec([]string{"go", "mod", "init", appModule}, gcp.WithWorkDir(appVendorDir))
-	ctx.Exec([]string{"go", "mod", "edit", "-require", fmt.Sprintf("%s@v0.0.0", fnMod)}, gcp.WithWorkDir(appVendorDir))
 
 	l.BuildEnvironment.Override(env.Buildable, appModule)
 	l.BuildEnvironment.Override(golang.BuildDirEnv, fn.Source)
@@ -243,7 +289,11 @@ func createMainGoModVendored(ctx *gcp.Context, fn fnInfo) error {
 
 // moduleAndPackageNames extracts the module name and package name of the function.
 func moduleAndPackageNames(ctx *gcp.Context, fn fnInfo) (string, string, error) {
-	fnMod := ctx.Exec([]string{"go", "list", "-m"}, gcp.WithWorkDir(fn.Source), gcp.WithUserAttribution).Stdout
+	result, err := ctx.Exec([]string{"go", "list", "-m"}, gcp.WithWorkDir(fn.Source), gcp.WithUserAttribution)
+	if err != nil {
+		return "", "", err
+	}
+	fnMod := result.Stdout
 	// golang.org/ref/mod requires that package names in a replace contains at least one dot.
 	if parts := strings.Split(fnMod, "/"); len(parts) > 0 && !strings.Contains(parts[0], ".") {
 		return "", "", gcp.UserErrorf("the module path in the function's go.mod must contain a dot in the first path element before a slash, e.g. example.com/module, found: %s", fnMod)
@@ -308,7 +358,9 @@ func createMainVendored(ctx *gcp.Context, fn fnInfo) error {
 	requestedFrameworkVersion := "v0.0.0"
 	if fnFrameworkVendoredPathExists {
 		ctx.Logf("Found function with vendored dependencies including functions-framework")
-		ctx.Exec([]string{"cp", "-r", fnVendoredPath, appPath}, gcp.WithUserTimingAttribution)
+		if _, err := ctx.Exec([]string{"cp", "-r", fnVendoredPath, appPath}, gcp.WithUserTimingAttribution); err != nil {
+			return err
+		}
 	} else {
 		// If the framework isn't in the user-provided vendor directory, we need to fetch it ourselves.
 		ctx.Logf("Found function with vendored dependencies excluding functions-framework")
@@ -328,7 +380,9 @@ func createMainVendored(ctx *gcp.Context, fn fnInfo) error {
 			fmt.Sprintf("cp --archive %s/. %s", cvt, ffDepsDir),
 			// The only dependency is the functions framework.
 			fmt.Sprintf("go mod edit -require %s@%s", functionsFrameworkModule, functionsFrameworkVersion),
-			// Download the FF and its dependencies at the versions specified in the FF's go.mod.
+			// Download dependencies and generate the go.sum file.
+			"go mod tidy",
+			// Prepare the vendor folder.
 			"go mod vendor",
 			// Copy the contents of the vendor dir into GOPATH/src.
 			fmt.Sprintf("cp --archive vendor/. %s", gopathSrc),
@@ -378,7 +432,7 @@ func createMainGoFile(ctx *gcp.Context, fn fnInfo, main, version string) error {
 
 // If a framework is specified, return the version. If unspecified, return an empty string.
 func frameworkSpecifiedVersion(ctx *gcp.Context, fnSource string) (string, error) {
-	res, err := ctx.ExecWithErr([]string{"go", "list", "-m", "-f", "{{.Version}}", functionsFrameworkModule}, gcp.WithWorkDir(fnSource), gcp.WithUserAttribution)
+	res, err := ctx.Exec([]string{"go", "list", "-m", "-f", "{{.Version}}", functionsFrameworkModule}, gcp.WithWorkDir(fnSource), gcp.WithUserAttribution)
 	if err == nil {
 		v := strings.TrimSpace(res.Stdout)
 		ctx.Logf("Found framework version %s", v)
@@ -406,10 +460,13 @@ func extractPackageNameInDir(ctx *gcp.Context, source string) (*parsedPackage, e
 	if err != nil {
 		return nil, fmt.Errorf("creating temp directory: %w", err)
 	}
-	stdout := ctx.Exec([]string{"go", "run", script, "-dir", source}, gcp.WithEnv("GOCACHE="+cacheDir), gcp.WithUserAttribution).Stdout
+	result, err := ctx.Exec([]string{"go", "run", script, "-dir", source}, gcp.WithEnv("GOCACHE="+cacheDir), gcp.WithUserAttribution)
+	if err != nil {
+		return nil, err
+	}
 
 	var pkg parsedPackage
-	if err := json.Unmarshal([]byte(stdout), &pkg); err != nil {
+	if err := json.Unmarshal([]byte(result.Stdout), &pkg); err != nil {
 		return nil, fmt.Errorf("unable to parse function package: %v", err)
 	}
 

@@ -1,0 +1,149 @@
+load("//internal/acceptance:defs.bzl", "acceptance_test_argo_source", "acceptance_test_suite")
+load(":args.bzl", "goargs")
+
+licenses(["notice"])
+
+exports_files([
+    "config.yaml",
+    "args.bzl",
+])
+
+test_suite(
+    name = "acceptance_test",
+    tests = [
+        "1.11_gcf_test",
+        "flex_test",
+        "gae_test",
+        "gcf_test",
+        "gcp_test",
+    ],
+)
+
+# The union of all versions across all products.
+VERSIONS_ALL_PRODUCTS = [
+    "1.11",
+    "1.12",
+    "1.13",
+    "1.14",
+    "1.15",
+    "1.16",
+    "1.18",
+    "1.19",
+    "1.20",
+]
+
+# The product versions for which there is GAE support.
+VERSIONS_GAE_SUPPORT = VERSIONS_ALL_PRODUCTS
+
+# The product versions for which there is GAE Flex support.
+# Note that the app.yamls in the test apps are still hardcoded to at least 1.18.
+VERSIONS_WITH_FLEX_SUPPORT = [
+    "1.18",
+    "1.19",
+]
+
+# The product versions for which there is explicit, tested GCP support. Technically any version is available
+# on GCP, but not all versions are tested.
+VERSIONS_GCP_SUPPORT = VERSIONS_ALL_PRODUCTS
+
+# The product versions for which there is GCF support. The GCF tests are expensive to run so only the released
+# versions are tested.
+VERSIONS_GCF_SUPPORT = [
+    "1.13",
+    "1.16",
+    "1.18",
+    "1.19",
+    "1.20",
+]
+
+# The GCF Legacy Worker is only available and used for the "GCF go111" runtime version. It has different behavior,
+# a unique order group, and is tested seperately.
+VERSION_GCF_LEGACY_WORKER = "1.11"
+
+acceptance_test_suite(
+    name = "gcf_test",
+    srcs = [
+        "common_test.go",
+        "gcf_test.go",
+    ],
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:functions",
+    versions = VERSIONS_GCF_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "gcp_test",
+    srcs = [
+        "common_test.go",
+        "gcp_test.go",
+    ],
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:generic",
+    versions = VERSIONS_GCP_SUPPORT,
+)
+
+# Test the run image tagged as latest in gae-runtimes.
+acceptance_test_suite(
+    name = "gae_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
+    ],
+    argsmap = goargs(),
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:appengine",
+    versions = VERSIONS_GAE_SUPPORT,
+)
+
+# Test the run image tagged as ${_CANDIDATE_NAME} in gae-runtimes-private.
+acceptance_test_suite(
+    name = "gae_candidate_test",
+    srcs = [
+        "common_test.go",
+        "gae_test.go",
+    ],
+    argsmap = goargs("$${_CANDIDATE_NAME}"),
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:appengine",
+    versions = VERSIONS_GAE_SUPPORT,
+)
+
+# This suite is a special suite just for go 1.11. The order group GCF & go111 includes the legacy-worker buildpack.
+# As a result, the behavior and the tests for that version are slightly different.
+acceptance_test_suite(
+    name = "1.11_gcf_test",
+    srcs = [
+        "common_test.go",
+        "v111_gcf_test.go",
+    ],
+    args = [
+        "-runtime-version=" + VERSION_GCF_LEGACY_WORKER,
+    ],
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:functions",
+)
+
+acceptance_test_suite(
+    name = "flex_test",
+    srcs = [
+        "common_test.go",
+        "flex_test.go",
+    ],
+    builder = "//builders/go:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/go:flex",
+    versions = VERSIONS_WITH_FLEX_SUPPORT,
+)
+
+acceptance_test_argo_source(
+    name = "argo_source",
+    srcs = [
+        ":1.11_gcf_test_cloudbuild_bin",
+    ],
+    testdata = "//builders/testdata:go",
+)

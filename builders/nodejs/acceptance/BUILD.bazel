@@ -1,0 +1,150 @@
+load("//internal/acceptance:defs.bzl", "acceptance_test_argo_source", "acceptance_test_suite")
+load(":args.bzl", "nodejsargs")
+
+licenses(["notice"])
+
+exports_files([
+    "config.yaml",
+    "args.bzl",
+])
+
+test_suite(
+    name = "acceptance_test",
+    tests = [
+        "8.17.0_gcf_test",
+        "flex_test",
+        "gae_test",
+        "gcf_test",
+        "gcp_test",
+    ],
+)
+
+VERSION_NODEJS8 = "8.17.0"
+
+VERSION_NODEJS10 = "10.24.1"
+
+VERSION_NODEJS12 = "12.22.12"
+
+VERSION_NODEJS14 = "14.21.2"
+
+VERSION_NODEJS16 = "16.13.2"
+
+VERSION_NODEJS18 = "18.10.0"
+
+VERSION_NODEJS20 = "19.6.0"
+
+VERSIONS_ALL = [
+    VERSION_NODEJS8,
+    VERSION_NODEJS10,
+    VERSION_NODEJS12,
+    VERSION_NODEJS14,
+    VERSION_NODEJS16,
+    VERSION_NODEJS18,
+    VERSION_NODEJS20,
+]
+
+VERSIONS_WITH_GAE_SUPPORT = [
+    VERSION_NODEJS10,
+    VERSION_NODEJS12,
+    VERSION_NODEJS14,
+    VERSION_NODEJS16,
+    VERSION_NODEJS18,
+    VERSION_NODEJS20,
+]
+
+VERSIONS_WITH_GCF_SUPPORT = [
+    VERSION_NODEJS10,
+    VERSION_NODEJS12,
+    VERSION_NODEJS14,
+    VERSION_NODEJS16,
+    VERSION_NODEJS18,
+    VERSION_NODEJS20,
+]
+
+VERSIONS_WITH_FLEX_SUPPORT = [
+    VERSION_NODEJS18,
+]
+
+# The GCF Legacy Worker is only available and used for the "GCF nodejs8" runtime version. It has
+# different behavior, a unique order group, and is tested seperately.
+VERSION_GCF_LEGACY_WORKER = VERSION_NODEJS8
+
+VERSIONS_WITH_GCP_SUPPORT = VERSIONS_ALL
+
+acceptance_test_suite(
+    name = "gcp_test",
+    srcs = [
+        "gcp_test.go",
+    ],
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:generic",
+    versions = VERSIONS_WITH_GCP_SUPPORT,
+)
+
+# Test the run image tagged as latest in gae-runtimes.
+acceptance_test_suite(
+    name = "gae_test",
+    srcs = [
+        "gae_test.go",
+    ],
+    argsmap = nodejsargs(),
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:appengine",
+    versions = VERSIONS_WITH_GAE_SUPPORT,
+)
+
+# Test the run image tagged as ${_CANDIDATE_NAME} in gae-runtimes-private.
+acceptance_test_suite(
+    name = "gae_candidate_test",
+    srcs = [
+        "gae_test.go",
+    ],
+    argsmap = nodejsargs("$${_CANDIDATE_NAME}"),
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:appengine",
+    versions = VERSIONS_WITH_GAE_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "gcf_test",
+    srcs = [
+        "gcf_test.go",
+    ],
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:functions",
+    versions = VERSIONS_WITH_GCF_SUPPORT,
+)
+
+acceptance_test_suite(
+    name = "8.17.0_gcf_test",
+    srcs = [
+        "legacy_worker_gcf_test.go",
+    ],
+    args = [
+        "-runtime-version=" + VERSION_GCF_LEGACY_WORKER,
+    ],
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:functions",
+)
+
+acceptance_test_argo_source(
+    name = "argo_source",
+    srcs = [
+        ":8.17.0_gcf_test_cloudbuild_bin",
+    ],
+    testdata = "//builders/testdata:nodejs",
+)
+
+acceptance_test_suite(
+    name = "flex_test",
+    srcs = ["flex_test.go"],
+    builder = "//builders/nodejs:builder.tar",
+    rundir = ".",
+    testdata = "//builders/testdata/nodejs:flex",
+    versions = VERSIONS_WITH_FLEX_SUPPORT,
+)

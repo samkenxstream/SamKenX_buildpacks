@@ -1,9 +1,0 @@
-api = "0.6"
-
-[buildpack]
-id = "google.dart.pub"
-version = "0.1.0"
-name = "Dart - Pub"
-
-[[stacks]]
-id = "google"

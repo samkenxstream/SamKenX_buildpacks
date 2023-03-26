@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The build.sh script builds stack images for the gcp/base builder.
+# The build.sh script builds stack images for the gcp/base and gcp/php builder.
 #
-# The script builds the following two images:
+# The script builds the following images:
 #   gcr.io/buildpacks/gcp/run:$tag
 #   gcr.io/buildpacks/gcp/build:$tag
+#   gcr.io/buildpacks/gcp/php/run:$tag
+#   gcr.io/buildpacks/gcp/php/build:$tag
 #
 # It also validates that the build image includes all required licenses.
 #
@@ -47,9 +49,3 @@ echo "> Building gcr.io/buildpacks/gcp/run:$TAG"
 docker build --build-arg "from_image=common" -t "gcr.io/buildpacks/gcp/run:$TAG" - < "${DIR}/run.Dockerfile"
 echo "> Building gcr.io/buildpacks/gcp/build:$TAG"
 docker build --build-arg "from_image=common" -t "gcr.io/buildpacks/gcp/build:$TAG" -f "${DIR}/build.Dockerfile" "${TEMP}"
-
-# Build PHP stack images
-echo "> Building gcr.io/buildpacks/gcp/php/run:$TAG"
-docker build --build-arg "from_image=gcr.io/buildpacks/gcp/run:$TAG" -t "gcr.io/buildpacks/gcp/php/run:$TAG" - < "${DIR}/php.Dockerfile"
-echo "> Building gcr.io/buildpacks/gcp/php/build:$TAG"
-docker build --build-arg "from_image=gcr.io/buildpacks/gcp/build:$TAG" -t "gcr.io/buildpacks/gcp/php/build:$TAG" - < "${DIR}/php.Dockerfile"

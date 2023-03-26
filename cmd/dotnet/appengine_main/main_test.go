@@ -27,22 +27,28 @@ func TestDetect(t *testing.T) {
 		want int
 	}{
 		{
-			name: "with app.yaml main",
+			name: "would normally opt in, but without TARGET_PLATFORM should opt out",
 			env:  []string{"GAE_YAML_MAIN=app.csproj"},
+			want: 100,
+		},
+		{
+			name: "with app.yaml main",
+			env:  []string{"GAE_YAML_MAIN=app.csproj", "X_GOOGLE_TARGET_PLATFORM=gae"},
 			want: 0,
 		},
 		{
 			name: "without app.yaml main",
+			env:  []string{"X_GOOGLE_TARGET_PLATFORM=gae"},
 			want: 100,
 		},
 		{
 			name: "with empty app.yaml main",
-			env:  []string{"GAE_YAML_MAIN="},
+			env:  []string{"GAE_YAML_MAIN=", "X_GOOGLE_TARGET_PLATFORM=gae"},
 			want: 100,
 		},
 		{
 			name: "with GOOGLE_BUILDABLE and app.yaml main",
-			env:  []string{"GAE_YAML_MAIN=app.csproj", "GOOGLE_BUILDABLE=other.csproj"},
+			env:  []string{"GAE_YAML_MAIN=app.csproj", "GOOGLE_BUILDABLE=other.csproj", "X_GOOGLE_TARGET_PLATFORM=gae"},
 			want: 100,
 		},
 	}

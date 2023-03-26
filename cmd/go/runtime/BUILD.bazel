@@ -10,6 +10,8 @@ buildpack(
     executables = [
         ":main",
     ],
+    prefix = "go",
+    version = "0.9.1",
     visibility = [
         "//builders:go_builders",
     ],
@@ -37,5 +39,8 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":main"],
     rundir = ".",
-    deps = ["//internal/buildpacktest"],
+    deps = [
+        "//internal/buildpacktest",
+        "//pkg/gcpbuildpack",
+    ],
 )

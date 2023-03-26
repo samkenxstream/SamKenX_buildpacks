@@ -1,9 +1,0 @@
-api = "0.5"
-
-[buildpack]
-id = "google.python.runtime"
-version = "0.9.1"
-name = "Python - Runtime"
-
-[[stacks]]
-id = "google"

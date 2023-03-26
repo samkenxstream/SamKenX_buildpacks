@@ -21,10 +21,15 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/buildpacks/pkg/env"
 	gcp "github.com/GoogleCloudPlatform/buildpacks/pkg/gcpbuildpack"
 	"github.com/GoogleCloudPlatform/buildpacks/pkg/testdata"
+	"github.com/buildpacks/libcnb"
+	"github.com/google/go-cmp/cmp"
+	"google3/third_party/golang/cmp/cmpopts/cmpopts"
 )
 
 func TestReadProjectFile(t *testing.T) {
@@ -89,23 +94,19 @@ func TestRuntimeConfigJSONFiles(t *testing.T) {
 		ExpectedResult       []string
 	}{
 		{
-			Name:                 "single file in same directory",
-			TestDataRelativePath: "subdir",
-			ExpectedResult:       []string{"subdir/my.runtimeconfig.json"},
+			Name:                 "finds single file in root dir",
+			TestDataRelativePath: "singleRtCfg",
+			ExpectedResult:       []string{"singleRtCfg/my.runtimeconfig.json"},
 		},
 		{
-			Name:                 "single file in sub-directory",
-			TestDataRelativePath: "another_dir",
-			ExpectedResult:       []string{"another_dir/with_subfolder/another.runtimeconfig.json"},
+			Name:                 "doesn't find recursively",
+			TestDataRelativePath: "nestedRtCfg",
+			ExpectedResult:       []string{},
 		},
 		{
-			Name:                 "multiple entries",
-			TestDataRelativePath: "",
-			ExpectedResult: []string{
-				"another_dir/with_subfolder/another.runtimeconfig.json",
-				"runtimeconfig.json/test.runtimeconfig.json",
-				"subdir/my.runtimeconfig.json",
-			},
+			Name:                 "finds multiples in root dir",
+			TestDataRelativePath: "multipleRtCfg",
+			ExpectedResult:       []string{"multipleRtCfg/my.runtimeconfig.json", "multipleRtCfg/my.second.runtimeconfig.json"},
 		},
 	}
 
@@ -123,7 +124,7 @@ func TestRuntimeConfigJSONFiles(t *testing.T) {
 			for _, val := range tc.ExpectedResult {
 				fullPathExpectedResults = append(fullPathExpectedResults, path.Join(rootDir, val))
 			}
-			if !reflect.DeepEqual(files, fullPathExpectedResults) {
+			if !cmp.Equal(files, fullPathExpectedResults, cmpopts.SortSlices(func(a, b string) bool { return a < b })) {
 				t.Errorf("RuntimeConfigFiles(%v) = %q, want %q", tstDir, files, fullPathExpectedResults)
 			}
 		})
@@ -131,7 +132,7 @@ func TestRuntimeConfigJSONFiles(t *testing.T) {
 }
 
 func TestReadRuntimeConfigJSON(t *testing.T) {
-	path := "testdata/runtimeconfig/subdir/my.runtimeconfig.json"
+	path := "testdata/runtimeconfig/singleRtCfg/my.runtimeconfig.json"
 	rtCfg, err := ReadRuntimeConfigJSON(testdata.MustGetPath(path))
 	if err != nil {
 		t.Fatalf("ReadRuntimeConfigJSON(%v) got error: %v", path, err)
@@ -142,16 +143,30 @@ func TestReadRuntimeConfigJSON(t *testing.T) {
 	}
 }
 
-func TestGetSDKorRuntimeVersion(t *testing.T) {
+func TestGetSDKVersion(t *testing.T) {
 	testCases := []struct {
 		Name                 string
+		SDKVersionEnvVar     string
 		RuntimeVersionEnvVar string
 		ApplicationRoot      string
 		ExpectedResult       string
 	}{
 		{
-			Name:                 "Should read from env var",
+			Name:                 "Should read from GOOGLE_RUNTIME_VERSION",
 			RuntimeVersionEnvVar: "2.1.100",
+			ApplicationRoot:      "",
+			ExpectedResult:       "2.1.100",
+		},
+		{
+			Name:             "Should read from GOOGLE_DOTNET_SDK_VERSION",
+			SDKVersionEnvVar: "2.1.100",
+			ApplicationRoot:  "",
+			ExpectedResult:   "2.1.100",
+		},
+		{
+			Name:                 "GOOGLE_DOTNET_SDK_VERSION takes precedence over GOOGLE_RUNTIME_VERSION",
+			SDKVersionEnvVar:     "2.1.100",
+			RuntimeVersionEnvVar: "3.1.100",
 			ApplicationRoot:      "",
 			ExpectedResult:       "2.1.100",
 		},
@@ -178,7 +193,12 @@ func TestGetSDKorRuntimeVersion(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
 			ctx := gcp.NewContext(gcp.WithApplicationRoot(tc.ApplicationRoot))
-			os.Setenv("GOOGLE_RUNTIME_VERSION", tc.RuntimeVersionEnvVar)
+			if tc.SDKVersionEnvVar != "" {
+				t.Setenv(envSdkVersion, tc.SDKVersionEnvVar)
+			}
+			if tc.RuntimeVersionEnvVar != "" {
+				t.Setenv(env.RuntimeVersion, tc.RuntimeVersionEnvVar)
+			}
 
 			result, err := GetSDKVersion(ctx)
 
@@ -192,88 +212,110 @@ func TestGetSDKorRuntimeVersion(t *testing.T) {
 	}
 }
 
-func Test_getSDKChannelForTargetFramework(t *testing.T) {
+func TestGetRuntimeVersion(t *testing.T) {
 	testCases := []struct {
-		Name                 string
-		TargetFrameworkValue string
-		ExpectedOK           bool
-		ExpectedResult       string
+		Name            string
+		RtVersionEnvVar string
+		RtCfgSearchRoot string
+		ExpectedVersion string
+		ExpectError     bool
+		ExpectErrSubStr string
 	}{
 		{
-			Name:                 "Empty",
-			TargetFrameworkValue: "",
-			ExpectedOK:           false,
-			ExpectedResult:       "",
+			Name:            "No env var, should read from runtimeconfig.json",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/runtimeconfig/singleRtCfg/"),
+			ExpectedVersion: "3.1.0",
 		},
 		{
-			Name:                 "NetCore 1.0",
-			TargetFrameworkValue: "netcoreapp1.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "1.0",
+			Name:            "Env var should take presidence over runtimeconfig.json",
+			RtVersionEnvVar: "6.0.5",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/runtimeconfig/singleRtCfg/"),
+			ExpectedVersion: "6.0.5",
 		},
 		{
-			Name:                 "NetCore 2.0",
-			TargetFrameworkValue: "netcoreapp2.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "2.2",
+			Name:            "No runtimeconfig.json found in root fails",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/"),
+			ExpectError:     true,
 		},
 		{
-			Name:                 "NetCore 2.1",
-			TargetFrameworkValue: "netcoreapp2.1",
-			ExpectedOK:           true,
-			ExpectedResult:       "2.2",
+			Name:            "Env var set, but no runtimeconfig.json found in root succeeds",
+			RtVersionEnvVar: "6.0.5",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/"),
+			ExpectedVersion: "6.0.5",
 		},
 		{
-			Name:                 "NetCore 2.2",
-			TargetFrameworkValue: "netcoreapp2.2",
-			ExpectedOK:           true,
-			ExpectedResult:       "2.2",
+			Name:            "More than one runtimeconfig.json fails",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/runtimeconfig/multipleRtCfg"),
+			ExpectError:     true,
 		},
 		{
-			Name:                 "NetCore 3.0",
-			TargetFrameworkValue: "netcoreapp3.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "3.1",
+			Name:            "Env var set, but more than one runtimeconfig.json succeeds",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/runtimeconfig/multipleRtCfg"),
+			ExpectError:     true,
 		},
 		{
-			Name:                 "NetCore 3.1",
-			TargetFrameworkValue: "netcoreapp3.1",
-			ExpectedOK:           true,
-			ExpectedResult:       "3.1",
-		},
-		{
-			Name:                 ".NET 5.0",
-			TargetFrameworkValue: "net5.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "5.0",
-		},
-		{
-			Name:                 ".NET 6.0",
-			TargetFrameworkValue: "net6.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "6.0",
-		},
-		{
-			Name:                 "Future version",
-			TargetFrameworkValue: "net9.0",
-			ExpectedOK:           true,
-			ExpectedResult:       "9.0",
-		},
-		{
-			Name:                 "Garbage value",
-			TargetFrameworkValue: "python3.7",
-			ExpectedOK:           false,
-			ExpectedResult:       "",
+			Name:            "Env var not set and non-Asp runtimeconfig.json fails",
+			RtCfgSearchRoot: testdata.MustGetPath("testdata/runtimeconfig/nonAspRtCfg"),
+			ExpectError:     true,
+			ExpectErrSubStr: "when GOOGLE_ASP_NET_CORE_VERSION absent, getting version from runtimeconfig.json failed: couldn't find runtime version for framework Microsoft.AspNetCore.App",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
-			result, ok := getSDKChannelForTargetFramework(tc.TargetFrameworkValue)
+			ctx := gcp.NewContext()
+			if tc.RtVersionEnvVar != "" {
+				t.Setenv(EnvRuntimeVersion, tc.RtVersionEnvVar)
+			}
+			runtimeVersion, err := GetRuntimeVersion(ctx, tc.RtCfgSearchRoot)
 
-			if ok != tc.ExpectedOK || result != tc.ExpectedResult {
-				t.Errorf("getSDKChannelForTargetFramework(%v) = (%v, %v), want (%v, %v)", tc.TargetFrameworkValue,
-					result, ok, tc.ExpectedResult, tc.ExpectedOK)
+			if tc.ExpectError == true {
+				if err == nil {
+					t.Fatalf("%s: got no error and expected error", tc.Name)
+				} else {
+					if tc.ExpectErrSubStr != "" && !strings.Contains(err.Error(), tc.ExpectErrSubStr) {
+						t.Fatalf("got error message %s and expected substring in error %s", err.Error(), tc.ExpectErrSubStr)
+					}
+					return
+				}
+			}
+			if err != nil {
+				t.Fatalf("GetRuntimeVersion(ctx, %v) got unexpected error: %v",
+					tc.RtCfgSearchRoot, err)
+			}
+			if tc.ExpectedVersion != runtimeVersion {
+				t.Errorf("GetRuntimeVersion(ctx, %v) = %v, want %v",
+					tc.RtCfgSearchRoot, runtimeVersion, tc.ExpectedVersion)
+			}
+		})
+	}
+}
+
+func TestRequiresGlobalizationInvariant(t *testing.T) {
+	testCases := []struct {
+		Stack string
+		Want  bool
+	}{
+		{
+			Stack: googleMin22,
+			Want:  true,
+		},
+		{
+			Stack: "google.gae.22",
+			Want:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Stack, func(t *testing.T) {
+			buildCtx := libcnb.BuildContext{
+				StackID: tc.Stack,
+			}
+			ctx := gcp.NewContext(gcp.WithBuildContext(buildCtx))
+
+			got := RequiresGlobalizationInvariant(ctx)
+			if got != tc.Want {
+				t.Errorf("RequiresGlobalizationInvariant(ctx) = %t, want %t", got, tc.Want)
 			}
 		})
 	}
